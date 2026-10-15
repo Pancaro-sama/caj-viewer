@@ -1,0 +1,28 @@
+# 开发与测试产物
+node_modules/
+.npm-cache/
+.vendor-stage/
+package-lock.json
+.syntax/
+.chrome-*/
+.c-*.err
+.c-*.out
+.chrome-log.txt
+.chrome-out.txt
+
+# 测试输出
+tests/out/
+
+# 打包产物（用 node tools/make-dist.mjs 随时重建）
+dist/
+
+# 编辑器 / 系统
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# 说明：vendor/ 是有意提交的——它让本工程开箱即用、无需任何安装步骤。
+
+# 随手 AirDrop 到 iPad 的 zip（用 node tools/make-release.mjs 重建）
+release/

@@ -1,0 +1,34 @@
+{
+  "name": "caj-viewer",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "纯前端、零后端的 CAJ / KDH / HN / C8 / PDF 阅读器：CAJ 系格式转 PDF 由 WebAssembly 在 Web Worker 内完成，PDF 渲染由 PDF.js 完成，文件不出本机。",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node serve.js",
+    "serve": "node serve.js",
+    "dist": "node tools/make-dist.mjs",
+    "dist:lite": "node tools/make-dist.mjs --without-fonts",
+    "release": "node tools/make-release.mjs",
+    "icons": "node tools/make-icons.mjs",
+    "fixtures": "node tests/make-fixtures.mjs",
+    "test:node": "node tests/make-fixtures.mjs && node tests/smoke.mjs",
+    "test:browser": "node tests/browser-e2e.mjs",
+    "test:dist": "node tools/make-dist.mjs && node tests/dist-smoke.mjs",
+    "test": "npm run test:node && npm run test:browser && npm run test:dist",
+    "upgrade:vendor": "node tests/update-vendor.mjs"
+  },
+  "devDependencies": {
+    "caj2pdf-rust": "0.8.1",
+    "pdfjs-dist": "6.4.299"
+  },
+  "comments": {
+    "runtime": "运行应用不需要任何 npm 依赖——所有第三方运行时都已放在 vendor/ 目录里。",
+    "devDependencies": "仅在需要把 vendor/ 升级到新版本时使用（npm run upgrade:vendor）。",
+    "vendorNote": "pdfjs-dist 用标准构建（非 legacy）；旧版 Safari 缺失的标准方法由 app/compat.js 垫片补齐，语法层面的门槛是 iPadOS 15。"
+  }
+}

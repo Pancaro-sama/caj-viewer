@@ -1,0 +1,37 @@
+# 静态托管的响应头（Cloudflare Pages / Netlify 会读取本文件；GitHub Pages 会忽略）
+
+# ── 1. WebAssembly 的 MIME ──────────────────────────────────────────────
+# .wasm 必须以 application/wasm 下发，否则 WebAssembly.compileStreaming 会失败。
+# （应用里还有一次性编译的兜底，但把 MIME 设对才是正解。）
+/vendor/caj2pdf-rust/*.wasm
+  Content-Type: application/wasm
+
+/vendor/pdfjs/wasm/*.wasm
+  Content-Type: application/wasm
+
+# 说明：本工程刻意不使用 .mjs 后缀。很多托管不把 .mjs 当 JavaScript 下发，
+# 而浏览器对模块脚本执行严格 MIME 检查，会直接拒绝执行整个模块图，页面表现成
+# 「界面在、脚本没跑」。所有模块统一是 .js，因此这里不需要额外的 MIME 规则。
+# 这一条由 tools/normalize-vendor.mjs 保证，并由 tests/dist-smoke.mjs 兜底检查。
+
+# ── 2. 应用外壳不缓存，保证更新后立刻生效 ───────────────────────────────
+/index.html
+  Cache-Control: no-cache
+
+/sw.js
+  Cache-Control: no-cache
+
+/app/*
+  Cache-Control: no-cache
+
+# ── 3. 跨源隔离（可选，但有价值）───────────────────────────────────────
+# 这三条头让页面成为 crossOriginIsolated，转换 Worker 就能拿到 SharedArrayBuffer，
+# 从而支持背压与「立即取消」。缺少它们应用照常工作，只是取消要等 Worker 被终止。
+#
+# 如果部署后出现奇怪的加载问题、又暂时查不出原因，**可以先把下面这几行删掉试一次** ——
+# 它们是本工程里唯一的「非必要响应头」。serve.js 在本地/局域网仍然会发送它们。
+/*
+  Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Embedder-Policy: require-corp
+  Cross-Origin-Resource-Policy: same-origin
+  X-Content-Type-Options: nosniff

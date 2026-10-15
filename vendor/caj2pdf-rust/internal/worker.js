@@ -1,0 +1,285 @@
+// SPDX-License-Identifier: MIT
+
+/**
+ * The Worker that runs one synchronous WASM operation. It receives a single
+ * `run` message from `internal/run.mjs`, reads its inputs synchronously,
+ * posts each output chunk, flush, and progress report back in order, and
+ * finishes with one `done` message.
+ *
+ * The control block is a shared `Int32Array`: CANCEL is set by the caller,
+ * ACKS counts output chunks the caller's sink has taken, and READ_STATE /
+ * READ_COUNT answer reads that the caller serves from its own thread.
+ */
+
+import { loadFontPack } from "./bundled-fonts.js";
+import { FONT_PACK } from "./font-pack.js";
+
+import { FORMATS } from "../io.js";
+
+const CANCEL = 0;
+const ACKS = 1;
+const READ_STATE = 2;
+const READ_COUNT = 3;
+/** Output chunks that may wait for the caller's sink before Rust pauses. */
+const WINDOW = 8;
+
+const node = typeof process !== "undefined" && process.versions?.node != null;
+
+let post;
+if (node) {
+  // Keep the module graph synchronous for bundlers' classic Worker output.
+  // Node queues messages until the listener is attached below.
+  import("node:worker_threads").then(({ parentPort }) => {
+    post = (message, transfer) => parentPort.postMessage(message, transfer);
+    parentPort.once("message", (message) => start(message));
+  });
+} else {
+  post = (message, transfer) => self.postMessage(message, transfer ?? []);
+  self.addEventListener("message", (event) => start(event.data), { once: true });
+}
+
+/**
+ * Run the operation and always answer with one `done` message, sent only
+ * after every input is closed: an OPFS file is free again once the caller
+ * settles.
+ */
+async function start(message) {
+  const closers = [];
+  let outcome;
+  try {
+    outcome = await run(message, closers);
+  } catch (error) {
+    outcome = { failure: { name: error?.name ?? "Error", message: String(error?.message ?? error) } };
+  }
+  for (const close of closers) {
+    try {
+      close();
+    } catch {}
+  }
+  post({ type: "done", ...outcome });
+}
+
+/** A synchronous reader `(offset, view) => count` for one input. */
+async function openReader(input, resource, control, data, closers) {
+  switch (input.kind) {
+    case "blob": {
+      const reader = new FileReaderSync();
+      return (offset, view) => {
+        const buffer = reader.readAsArrayBuffer(input.blob.slice(offset, offset + view.byteLength));
+        view.set(new Uint8Array(buffer));
+        return buffer.byteLength;
+      };
+    }
+    case "opfs": {
+      const access = await input.handle.createSyncAccessHandle();
+      closers.push(() => access.close());
+      return (offset, view) => access.read(view, { at: offset });
+    }
+    case "path":
+    case "fd": {
+      const fs = await import("node:fs");
+      let fd = input.fd;
+      if (input.kind === "path") {
+        fd = fs.openSync(input.path, "r");
+        closers.push(() => fs.closeSync(fd));
+      }
+      return (offset, view) => fs.readSync(fd, view, 0, view.byteLength, offset);
+    }
+    case "served": {
+      // The caller reads the range on its own thread into `data`.
+      return (offset, view) => {
+        Atomics.store(control, READ_STATE, 0);
+        post({ type: "read", resource, offset, length: view.byteLength });
+        while (Atomics.load(control, READ_STATE) === 0) {
+          Atomics.wait(control, READ_STATE, 0);
+        }
+        const count = Atomics.load(control, READ_COUNT);
+        if (count < 0 || count > view.byteLength) throw new Error("the caller could not read the input");
+        view.set(data.subarray(0, count));
+        return count;
+      };
+    }
+    default:
+      throw new TypeError(`unsupported input kind: ${input.kind}`);
+  }
+}
+
+async function run({ operation, module, inputs, fonts, config, control, data }, closers) {
+  const shared = control == null ? null : new Int32Array(control);
+  const served = data == null ? null : new Uint8Array(data);
+  const readers = [];
+  for (const [resource, input] of inputs.entries()) {
+    readers.push(await openReader(input, resource, shared, served, closers));
+  }
+  let memory;
+  let posted = 0;
+  let reportProgress = false;
+  let hostFailure;
+  const imports = {
+    caj2pdf: {
+      caj2pdf_read(resource, offset, pointer, length) {
+        try {
+          return readers[resource](offset, new Uint8Array(memory.buffer, pointer, length));
+        } catch (error) {
+          hostFailure ??= { name: error?.name ?? "Error", message: String(error?.message ?? error) };
+          return -1;
+        }
+      },
+      caj2pdf_write(pointer, length) {
+        // A copy, so Rust may reuse its buffer at once.
+        const bytes = new Uint8Array(memory.buffer, pointer, length).slice();
+        post({ type: "write", bytes }, [bytes.buffer]);
+        posted += 1;
+        if (shared != null) {
+          for (;;) {
+            const acked = Atomics.load(shared, ACKS);
+            if (((posted - acked) | 0) <= WINDOW || Atomics.load(shared, CANCEL) !== 0) break;
+            Atomics.wait(shared, ACKS, acked);
+          }
+        }
+        return length;
+      },
+      caj2pdf_flush() {
+        post({ type: "flush" });
+        return 0;
+      },
+      caj2pdf_progress(done, total) {
+        if (reportProgress) post({ type: "progress", done, total });
+      },
+      caj2pdf_cancelled() {
+        return shared == null ? 0 : Atomics.load(shared, CANCEL);
+      },
+    },
+  };
+  const exports = (await WebAssembly.instantiate(module, imports)).exports;
+  memory = exports.memory;
+  if (config.ttknResponse !== undefined) {
+    const bytes = new TextEncoder().encode(config.ttknResponse);
+    const view = new DataView(bytes.buffer);
+    const words = [0, 8, 16, 24].map((offset) => view.getBigUint64(offset, true));
+    const accepted = exports.caj2pdf_set_ttkn_response?.(...words);
+    bytes.fill(0);
+    words.fill(0n);
+    if (accepted !== 1) throw new TypeError("WASM module rejected the TTKN response configuration");
+  }
+  if (operation === "convert" && fonts == null && config.bundledFonts && (config.format === 0 || config.format === 4 || config.format === 5)) {
+    const { size, chunkSize, limits } = config;
+    const mode = exports.caj2pdf_native_font_mode?.(BigInt(size), chunkSize, limits.maxInputBytes, limits.maxOutputBytes, limits.maxAllocationBytes, limits.maxPages, limits.maxBookmarks);
+    if (mode === 1 || mode === 3) {
+      await loadFontPack(async (input) => {
+        const pack = await openReader(input, 1, shared, served, closers);
+        readers[1] = pack;
+        if (exports.caj2pdf_use_bundled_fonts(mode - 1, chunkSize, limits.maxAllocationBytes) !== 1) return false;
+        for (const [index, { offset, size }] of FONT_PACK.resources.entries()) {
+          readers[index + 1] = (at, view) => pack(offset + at, view.subarray(0, Math.max(0, Math.min(view.byteLength, size - at))));
+        }
+        return true;
+      }, () => shared != null && Atomics.load(shared, CANCEL) !== 0);
+    }
+  }
+  if (fonts != null) {
+    for (const [index, face] of fonts.faces.entries()) {
+      if (exports.caj2pdf_c8_add_font(BigInt(inputs[index + 1].size), face) !== index + 1) {
+        return { invalid: "WASM rejected a C8 font resource" };
+      }
+    }
+    const roles = fonts.symbols === undefined
+      ? exports.caj2pdf_c8_set_fonts(...fonts.roles)
+      : exports.caj2pdf_c8_set_fonts_with_symbols(...fonts.roles, fonts.symbols);
+    if (roles !== 1) return { invalid: "WASM rejected C8 font roles" };
+    if (fonts.embedding === "full" && exports.caj2pdf_c8_set_font_embedding?.(1) !== 1) {
+      return { invalid: "WASM rejected complete font embedding" };
+    }
+    for (const [font, character, glyph] of fonts.glyphAliases) {
+      if (exports.caj2pdf_c8_add_font_glyph?.(font, character, glyph) !== 1) {
+        return { invalid: "WASM rejected a native font glyph alias" };
+      }
+    }
+    for (const state of [3, 28, 31]) {
+      const index = fonts[`latinState${state}`];
+      if (index !== undefined && exports.caj2pdf_c8_set_latin_state(state, index) !== 1) {
+        return { invalid: `WASM rejected the state-${state} Latin font role` };
+      }
+    }
+    for (const [style, index] of [[0x0800, fonts.cjkSans], [0x0c00, fonts.cjkKai], [0x0400, fonts.cjkSystem]]) {
+      if (index !== undefined && exports.caj2pdf_c8_set_cjk_style?.(style, index) !== 1) {
+        return { invalid: "WASM rejected a C8 CJK style font role" };
+      }
+    }
+    for (const [identity, setter, role] of [
+      [fonts.symbolFontIdentity, exports.caj2pdf_hnb_set_symbol_font, "symbol"],
+      [fonts.decorationFontIdentity, exports.caj2pdf_c8_set_decoration_font, "decoration"],
+    ]) {
+      if (identity === undefined) continue;
+      const { postscriptName, checksumAdjustment } = identity;
+      const view = new DataView(new ArrayBuffer(64));
+      for (let i = 0; i < postscriptName.length; i++) view.setUint8(i, postscriptName.charCodeAt(i));
+      const words = Array.from({ length: 8 }, (_, i) => view.getBigUint64(i * 8, true));
+      if (setter?.(checksumAdjustment, postscriptName.length, ...words) !== 1) {
+        return { invalid: `WASM rejected the ${role} font identity` };
+      }
+    }
+    for (const [value, glyph] of fonts.decorationGlyphs) {
+      if (exports.caj2pdf_c8_add_decoration_glyph?.(value, glyph) !== 1) {
+        return { invalid: `WASM rejected the decoration glyph for value ${value}` };
+      }
+    }
+    for (const [code, glyph] of fonts.symbolGlyphs) {
+      if (exports.caj2pdf_hnb_add_symbol_glyph?.(code, glyph) !== 1) {
+        return { invalid: `WASM rejected the symbol glyph for code ${code.toString(16)}` };
+      }
+    }
+  }
+  const { size, chunkSize, format, flags, limits } = config;
+  reportProgress = true;
+  const status = operation === "convert"
+    ? exports.caj2pdf_convert(BigInt(size), chunkSize, format, flags, limits.maxInputBytes, limits.maxOutputBytes, limits.maxAllocationBytes, limits.maxPages, limits.maxBookmarks)
+    : exports.caj2pdf_inspect(BigInt(size), chunkSize, format, limits.maxInputBytes, limits.maxOutputBytes, limits.maxAllocationBytes, limits.maxPages, limits.maxBookmarks);
+  if (status === 2 || status === 3) return { invalid: "invalid WASM operation configuration" };
+  const formatCode = exports.caj2pdf_format();
+  if (status !== 0) {
+    const message = new TextDecoder().decode(
+      new Uint8Array(memory.buffer, exports.caj2pdf_message_ptr(), exports.caj2pdf_message_len()),
+    );
+    return { error: { kind: exports.caj2pdf_error_kind(), message, format: formatCode }, hostFailure };
+  }
+  return { result: operation === "convert" ? report(exports, formatCode) : inspection(exports, formatCode, memory) };
+}
+
+function report(exports, format) {
+  return {
+    format,
+    inputBytesRead: exports.caj2pdf_input_bytes_read(),
+    outputBytesWritten: exports.caj2pdf_output_bytes_written(),
+    pagesConverted: exports.caj2pdf_pages_converted(),
+    substitutedGlyphs: exports.caj2pdf_substituted_glyphs(),
+    bookmarksWritten: exports.caj2pdf_bookmarks_written(),
+    omittedPages: Array.from({ length: exports.caj2pdf_omitted_pages_count() }, (_, index) => ({
+      pageIndex: exports.caj2pdf_omitted_page_index(index),
+      offset: exports.caj2pdf_omitted_page_offset(index),
+    })),
+    outlineWarnings: exports.caj2pdf_outline_warnings(),
+    outlineOmitted: exports.caj2pdf_outline_omitted() !== 0,
+  };
+}
+
+function applicationText(exports, memory, field) {
+  const length = exports.caj2pdf_info_text_len(field);
+  if (length === 0) return null;
+  return new TextDecoder().decode(new Uint8Array(memory.buffer, exports.caj2pdf_info_text_ptr(field), length));
+}
+
+function inspection(exports, format, memory) {
+  const bookmarks = exports.caj2pdf_info_bookmark_count();
+  const notes = exports.caj2pdf_info_note_count();
+  return {
+    format,
+    pageCount: FORMATS[format] === "caa" ? null : exports.caj2pdf_info_page_count(),
+    bookmarkCount: bookmarks < 0n ? null : Number(bookmarks),
+    outlineWarnings: exports.caj2pdf_outline_warnings(),
+    applicationInfo: notes < 0n
+      ? null
+      : { doi: applicationText(exports, memory, 0), url: applicationText(exports, memory, 1), noteCount: Number(notes) },
+    inputBytesRead: exports.caj2pdf_input_bytes_read(),
+  };
+}
