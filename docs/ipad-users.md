@@ -223,6 +223,9 @@ node tools/update-ipad.mjs --from ~/Documents/caj-viewer-new             # 真�
 - 想反悔：`node tools/update-ipad.mjs --rollback`。
 - 不确定会不会动到什么：`node tools/update-ipad.mjs --list` 看它认识哪些版本。
 
+> 从随包 zip 解出来的 `tools/` 里，脚本叫 `update-ipad.js`（部署产物不允许出现 `.mjs`）；
+> 源码仓库里叫 `update-ipad.mjs`。两种都能用 `node` 直接跑，`ls tools/` 看一下实际名字。
+
 > 更新完刷新 Safari 页面即可。如果「关于」里点「检查更新」提示有新版本，就是该走这一步了。
 
 ---

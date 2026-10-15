@@ -33,6 +33,11 @@
    node tools/update-ipad.mjs --from ~/Documents/caj-viewer-ipad-full.zip
    ```
 
+   > **后缀说明**：从随包 zip 解出来的 `tools/` 里，这两个脚本叫
+   > `update-ipad.js` / `inject-version.js`（部署产物不允许出现 `.mjs`，
+   > 详见 README）。源码仓库里它们叫 `update-ipad.mjs` / `inject-version.mjs`。
+   > 两种后缀都能用 `node` 直接跑，`ls tools/` 看一下实际叫什么就行。
+
 3. 重开服务并刷新 Safari：
 
    ```sh

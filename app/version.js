@@ -8,8 +8,8 @@
 
 export const VERSION = Object.freeze({
   app: '2.0.0',
-  build: '2026-10-15T14:07:19.298Z',
-  commit: '59d56b0',
+  build: '2026-10-15T14:11:54.859Z',
+  commit: 'f266bd3',
   channel: 'local',
 });
 

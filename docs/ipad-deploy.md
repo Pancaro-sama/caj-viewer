@@ -348,6 +348,7 @@ node tools/update-ipad.mjs --rollback                                    # 回�
 ```
 
 它只覆盖程序文件、不动用户自己的文件，更新前备份到 `.releases/`（保留最近 3 份）。
+随包 zip 解出来的 `tools/` 里脚本叫 `update-ipad.js`（部署产物不含 `.mjs`），源码仓库里叫 `update-ipad.mjs`，两种都能直接跑。
 
 Safari 可能缓存旧外壳。`_headers` 里已经给 `index.html` / `app/*` / `sw.js` 设了 `no-cache`，
 用 Netlify 或 Cloudflare Pages 托管时无需手工清缓存；GitHub Pages 上如果看到旧版本，

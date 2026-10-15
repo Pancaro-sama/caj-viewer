@@ -3,12 +3,14 @@
  * 在 iPad（a-Shell）或电脑上原地更新 caj-viewer。
  *
  * 用法（在**旧版本目录里**执行）：
- *   node tools/update-ipad.mjs --from ~/Documents/caj-viewer-new
- *   node tools/update-ipad.mjs --from ~/Documents/caj-viewer-ipad-full.zip
- *   node tools/update-ipad.mjs --list
- *   node tools/update-ipad.mjs --rollback
- *   node tools/update-ipad.mjs --from <src> --dry-run     # 只检查，不落盘
+ *   node tools/update-ipad.js --from ~/Documents/caj-viewer-new
+ *   node tools/update-ipad.js --from ~/Documents/caj-viewer-ipad-full.zip
+ *   node tools/update-ipad.js --list
+ *   node tools/update-ipad.js --rollback
+ *   node tools/update-ipad.js --from <src> --dry-run     # 只检查，不落盘
  *
+ * 后缀：随包发布时本文件被重命名为 .js（部署产物不允许出现 .mjs，见 tools/make-dist.mjs）；
+ * 源码仓库里它是 tools/update-ipad.mjs。两种后缀都能用 node 直接执行。
  * 做法（笔记类 App 的更新方式，重点是不丢书签/设置，出问题能回退）：
  *   1. 校验来源：必须有 index.html / app/app.js / app/compat.js / vendor/…（缺一个就中止）
  *   2. 把当前版本整目录复制成 .releases/<旧版本>-<时间戳>/
@@ -30,6 +32,10 @@ const HERE = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const RELEASES_DIR = join(HERE, '.releases');
 const STAMP_FILE = join(HERE, '.caj-version.json');
 const KEEP_RELEASES = 3;
+
+/* 脚本自己的名字：源码仓库里是 update-ipad.mjs，随包产物里是 update-ipad.js，
+   提示信息里要显示用户实际用的那个（否则复制粘贴会报「找不到文件」）。 */
+const SELF = basename(process.argv[1] || '') || 'update-ipad.js';
 
 const argv = process.argv.slice(2);
 const flag = (name) => argv.includes(name);
@@ -142,7 +148,7 @@ if (flag('--rollback')) {
 
 /* ── 主流程：--from ──────────────────────────────────────────────────── */
 const from = value('--from');
-if (!from) die('用法：node tools/update-ipad.mjs --from <新版本目录或 zip>  （更多见文件头注释）');
+if (!from) die(`用法：node tools/${SELF} --from <新版本目录或 zip>  （更多见文件头注释）`);
 
 const dryRun = flag('--dry-run');
 const { dir: srcDir, temp } = await resolveSource(resolve(from.replace(/^~(?=$|\/)/, process.env.HOME || '')));
@@ -221,4 +227,4 @@ say(`
   3. 打开「设置 → 关于」确认版本号是 ${newVersion}
 
 出问题就回退：
-  node tools/update-ipad.mjs --rollback`);
+  node tools/${SELF} --rollback`);

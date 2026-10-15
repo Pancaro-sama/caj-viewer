@@ -89,6 +89,11 @@ try {
     ['/sw.js', 'javascript'],
     ['/_headers', ''],
     ['/app/icon.svg', 'svg'],
+    // 原地更新脚本：IPAD-UPDATE.md 让用户跑的第一条命令就是它，
+    // 漏进产物会让随包更新直接报「找不到文件」。
+    // 产物里用 .js 后缀（部署产物不允许出现 .mjs）。
+    ['/tools/update-ipad.js', 'javascript'],
+    ['/tools/inject-version.js', 'javascript'],
   ];
   const missing = [];
   for (const [path, expectType] of must) {

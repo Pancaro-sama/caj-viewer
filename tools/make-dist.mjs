@@ -36,6 +36,15 @@ const ITEMS = [
   'start.cmd',
   'start.sh',
   'README.md',
+  // 原地更新要用的脚本：没有它们，IPAD-UPDATE.md 里写的第一步在解压出来的
+  // 包里会直接报「找不到文件」（曾经漏过）。只放运行时的两个，其余打包/图标
+  // 脚本属于开发工具，不进部署包。
+  //
+  // 注意后缀：部署产物里**不能出现 .mjs**（很多托管不把它当 JavaScript 下发，
+  // 浏览器模块图会被拒；见 tests/dist-smoke.mjs 的兜底断言）。这两个是 Node
+  // 脚本，改名为 .js 后 node 依旧按 ESM 执行（package.json 里 type=module）。
+  'tools/update-ipad.mjs',
+  'tools/inject-version.mjs',
 ];
 
 console.log(`\n打包到 ${DIST}`);
@@ -44,14 +53,22 @@ console.log(`字体包：${withFonts ? '包含' : '跳过（--without-fonts）'}
 await rm(DIST, { recursive: true, force: true });
 await mkdir(DIST, { recursive: true });
 
+/* 运行时 Node 脚本在产物里换成 .js 后缀：node 仍按 ESM 执行（type=module），
+   但产物不再含 .mjs，避免托管商 MIME 表把包弄坏。 */
+const RENAME_IN_DIST = new Map([
+  ['tools/update-ipad.mjs', 'tools/update-ipad.js'],
+  ['tools/inject-version.mjs', 'tools/inject-version.js'],
+]);
+
 for (const item of ITEMS) {
   const from = join(ROOT, item);
   if (!existsSync(from)) {
     console.log(`  跳过（不存在）：${item}`);
     continue;
   }
-  await cp(from, join(DIST, item), { recursive: true });
-  console.log(`  + ${item}`);
+  const target = RENAME_IN_DIST.get(item) || item;
+  await cp(from, join(DIST, target), { recursive: true });
+  console.log(`  + ${target}`);
 }
 
 /* 处理可选的字体包：它单独放在 vendor/caj2pdf-rust/ 下 */
