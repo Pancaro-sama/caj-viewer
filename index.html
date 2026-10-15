@@ -18,6 +18,9 @@
 <script src="./app/compat.js"></script>
 <link rel="stylesheet" href="./vendor/pdfjs/pdf_viewer.css" />
 <link rel="stylesheet" href="./app/style.css" />
+<link rel="stylesheet" href="./app/style-docs.css" />
+<link rel="stylesheet" href="./app/style-settings.css" />
+<link rel="stylesheet" href="./app/style-pinch.css" />
 </head>
 <body>
 
@@ -36,6 +39,7 @@
     <g id="i-search"><circle cx="11" cy="11" r="6.5"/><path d="M15.8 15.8 21 21"/></g>
     <g id="i-download"><path d="M12 3.5v11"/><path d="m7.5 10 4.5 4.5L16.5 10"/><path d="M4 17.5v1A2 2 0 0 0 6 20.5h12a2 2 0 0 0 2-2v-1"/></g>
     <g id="i-theme"><circle cx="12" cy="12" r="4.5"/><path d="M12 2v2.5M12 19.5V22M2 12h2.5M19.5 12H22M4.9 4.9l1.8 1.8M17.3 17.3l1.8 1.8M19.1 4.9l-1.8 1.8M6.7 17.3l-1.8 1.8"/></g>
+    <g id="i-settings"><circle cx="12" cy="12" r="3.2"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1.03 1.56V21a2 2 0 1 1-4 0v-.11a1.7 1.7 0 0 0-1.11-1.56 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.56-1.03H3a2 2 0 1 1 0-4h.11a1.7 1.7 0 0 0 1.56-1.11 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34H9a1.7 1.7 0 0 0 1.03-1.56V3a2 2 0 1 1 4 0v.11a1.7 1.7 0 0 0 1.03 1.56 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87V9a1.7 1.7 0 0 0 1.56 1.03H21a2 2 0 1 1 0 4h-.11a1.7 1.7 0 0 0-1.49 1.03z"/></g>
     <g id="i-close"><path d="M6 6l12 12M18 6L6 18"/></g>
     <g id="i-up"><path d="M12 19V5"/><path d="m5.5 11.5 6.5-6.5 6.5 6.5"/></g>
     <g id="i-down"><path d="M12 5v14"/><path d="m5.5 12.5 6.5 6.5 6.5-6.5"/></g>
@@ -79,11 +83,18 @@
     <button id="btnRotate" class="icon-btn" title="旋转 90°" aria-label="旋转"><svg viewBox="0 0 24 24"><use href="#i-rotate"/></svg></button>
     <button id="btnSearch" class="icon-btn" title="查找 (Ctrl+F)" aria-label="查找"><svg viewBox="0 0 24 24"><use href="#i-search"/></svg></button>
     <button id="btnTheme" class="icon-btn" title="深浅色" aria-label="深浅色"><svg viewBox="0 0 24 24"><use href="#i-theme"/></svg></button>
+    <button id="btnSettings" class="icon-btn" title="设置" aria-label="设置"><svg viewBox="0 0 24 24"><use href="#i-settings"/></svg></button>
     <button id="btnDownload" class="primary-btn" title="保存为 PDF">
       <svg viewBox="0 0 24 24"><use href="#i-download"/></svg><span class="btn-label">保存 PDF</span>
     </button>
   </div>
 </header>
+
+<!-- ANCHOR:tabs  文件标签栏；由 app/docs.js 渲染，样式在 app/style-docs.css -->
+<div id="docTabs" class="doc-tabs" hidden>
+  <div id="docTabList" class="doc-tab-list" role="tablist"></div>
+  <button id="btnNewTab" class="doc-tab-new" title="打开新文件" aria-label="打开新文件">＋</button>
+</div>
 
 <!-- ─────────────────────────  查找栏  ───────────────────────── -->
 <div id="searchBar" class="search-bar" hidden>
@@ -142,6 +153,9 @@
 </div>
 
 <div id="dropOverlay" class="drop-overlay" hidden><div class="drop-inner">松开以打开文件</div></div>
+
+<!-- ANCHOR:settings  设置面板容器；内容由 app/settings.js 渲染，样式在 app/style-settings.css -->
+<div id="settingsOverlay" class="modal-overlay settings-overlay" hidden></div>
 
 <!-- ─────────────────────────  转换进度  ───────────────────────── -->
 <div id="progressOverlay" class="modal-overlay" hidden>

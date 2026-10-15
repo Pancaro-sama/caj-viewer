@@ -1,0 +1,492 @@
+/* ==========================================================================
+   CAJ 阅读器 — 设置面板样式
+   只服务 app/settings.js；所有类名以 .settings- 前缀避免污染既有样式。
+   触控目标 ≥ 44px；iPad 竖屏 820px 宽下不产生横向滚动。
+   ========================================================================== */
+
+.settings-overlay {
+  z-index: 105;                 /* 高于其它 modal，低于 toast(110) */
+  padding: 16px;
+  padding: calc(16px + env(safe-area-inset-top)) calc(16px + env(safe-area-inset-right))
+           calc(16px + env(safe-area-inset-bottom)) calc(16px + env(safe-area-inset-left));
+}
+
+.settings-panel {
+  display: flex;
+  flex-direction: column;
+  width: min(760px, 100%);
+  height: min(760px, 100%);
+  max-height: 100%;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+}
+
+/* ── 标题栏 ── */
+
+.settings-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px 10px 20px;
+  border-bottom: 1px solid var(--border);
+  flex: 0 0 auto;
+}
+
+.settings-title {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 650;
+}
+
+.settings-close {
+  width: 44px;
+  height: 44px;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 16px;
+  cursor: pointer;
+}
+.settings-close:hover { background: var(--surface-3); color: var(--text); }
+.settings-close:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ── 分区标签 ── */
+
+.settings-tabs {
+  display: flex;
+  gap: 6px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-soft);
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  flex: 0 0 auto;
+  scrollbar-width: none;
+}
+.settings-tabs::-webkit-scrollbar { display: none; }
+
+.settings-tab {
+  flex: 1 0 auto;
+  min-height: 44px;
+  min-width: 56px;
+  padding: 0 14px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: var(--surface-2);
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 13.5px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.settings-tab:hover { background: var(--surface-3); }
+.settings-tab.is-on {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
+.settings-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ── 主体 ── */
+
+.settings-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  -webkit-overflow-scrolling: touch;
+  padding: 8px 20px 24px;
+  overscroll-behavior: contain;
+}
+
+.settings-section[hidden] { display: none; }
+
+.settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  min-height: 56px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border-soft);
+}
+.settings-section .settings-row:last-child { border-bottom: 0; }
+
+.settings-row-stack {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+}
+
+.settings-label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.settings-label > span {
+  font-size: 14.5px;
+  font-weight: 550;
+}
+.settings-label small {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+.settings-label small.is-bad { color: var(--danger); }
+.settings-label-text {
+  margin: 0 0 10px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+.settings-muted {
+  margin: 6px 0;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+.settings-value {
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.settings-value.is-bad { color: var(--danger); }
+
+/* ── 分段控件 ── */
+
+.settings-seg {
+  display: inline-flex;
+  gap: 3px;
+  padding: 3px;
+  flex: 0 0 auto;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 13px;
+}
+.settings-seg-btn {
+  min-height: 40px;
+  min-width: 44px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 13.5px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.settings-seg-btn:hover { background: var(--surface-3); }
+.settings-seg-btn.is-on {
+  background: var(--surface);
+  color: var(--accent);
+  font-weight: 600;
+  box-shadow: var(--shadow-sm);
+}
+.settings-seg-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* ── 开关 ── */
+
+.settings-switch {
+  flex: 0 0 auto;
+  width: 60px;
+  height: 44px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  position: relative;
+}
+.settings-switch::before {
+  content: '';
+  position: absolute;
+  top: 7px;
+  left: 4px;
+  right: 4px;
+  height: 30px;
+  border-radius: 15px;
+  background: var(--surface-3);
+  border: 1px solid var(--border);
+  transition: background .16s ease-out;
+}
+.settings-switch-knob {
+  position: absolute;
+  top: 10px;
+  left: 7px;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+  transition: transform .16s ease-out;
+}
+.settings-switch.is-on::before { background: var(--accent); border-color: var(--accent); }
+.settings-switch.is-on .settings-switch-knob { transform: translateX(22px); }
+.settings-switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 22px; }
+
+/* ── 滑杆 / 下拉 / 按钮 ── */
+
+.settings-range-wrap {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 44px;
+}
+.settings-range {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: 100%;
+  height: 44px;
+  margin: 0;
+  background: transparent;
+  -webkit-appearance: none;
+  appearance: none;
+  cursor: pointer;
+}
+.settings-range::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--surface-3);
+  border: 1px solid var(--border);
+}
+.settings-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 28px;
+  height: 28px;
+  margin-top: -12px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid var(--surface);
+  box-shadow: var(--shadow-sm);
+}
+.settings-range::-moz-range-track {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--surface-3);
+}
+.settings-range::-moz-range-thumb {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid var(--surface);
+}
+.settings-range:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.settings-select {
+  flex: 0 0 auto;
+  min-height: 44px;
+  max-width: 50%;
+  padding: 0 34px 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-2) url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8'%3E%3Cpath d='M1 1l5 5 5-5' fill='none' stroke='%236b7280' stroke-width='2'/%3E%3C/svg%3E") no-repeat right 12px center;
+  color: var(--text);
+  font: inherit;
+  font-size: 13.5px;
+  -webkit-appearance: none;
+  appearance: none;
+  cursor: pointer;
+}
+.settings-select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.settings-btn {
+  flex: 0 0 auto;
+  min-height: 44px;
+  padding: 0 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+  font-size: 13.5px;
+  text-decoration: none;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.settings-btn:hover { background: var(--surface-3); }
+.settings-btn:disabled { opacity: .55; cursor: default; }
+.settings-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.settings-btn-danger { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 45%, var(--border)); }
+.settings-btn-danger:hover { background: color-mix(in srgb, var(--danger) 12%, var(--surface-2)); }
+
+.settings-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-top: 14px;
+  margin-top: 4px;
+  border-top: 1px solid var(--border-soft);
+}
+
+/* ── 文件列表 ── */
+
+.settings-doc-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.settings-doc {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  width: 100%;
+  min-height: 56px;
+  padding: 10px 14px;
+  text-align: left;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+.settings-doc:hover { background: var(--surface-3); }
+.settings-doc.is-on {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.settings-doc:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.settings-doc-name {
+  font-size: 13.5px;
+  font-weight: 550;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.settings-doc-meta { font-size: 11.5px; color: var(--text-dim); }
+
+/* ── 诊断 ── */
+
+.settings-diag-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 0 12px;
+}
+
+.settings-diag-wrap {
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: var(--surface-2);
+  overflow: hidden;
+}
+.settings-diag-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+  table-layout: fixed;
+}
+.settings-diag-table th,
+.settings-diag-table td {
+  padding: 9px 12px;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--border-soft);
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.settings-diag-table tr:last-child th,
+.settings-diag-table tr:last-child td { border-bottom: 0; }
+.settings-diag-table th {
+  width: 40%;
+  font-weight: 550;
+  color: var(--text-dim);
+}
+.settings-diag-table td { color: var(--text); }
+.settings-diag-table tr.is-bad th,
+.settings-diag-table tr.is-bad td { color: var(--danger); }
+
+.settings-tips-list {
+  margin: 14px 0 0;
+  padding-left: 20px;
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: var(--text-dim);
+}
+.settings-tips-list li { margin-bottom: 4px; overflow-wrap: anywhere; }
+
+/* ── 关于 ── */
+
+.settings-about-head {
+  padding: 8px 0 16px;
+  border-bottom: 1px solid var(--border-soft);
+}
+.settings-about-name { font-size: 18px; font-weight: 650; }
+.settings-about-sub {
+  margin-top: 4px;
+  font-size: 12.5px;
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+
+.settings-kv {
+  margin: 0;
+  padding: 6px 0 4px;
+}
+.settings-kv > div {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 40px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border-soft);
+}
+.settings-kv dt { font-size: 13.5px; color: var(--text-dim); flex: 0 0 auto; }
+.settings-kv dd {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text);
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  text-align: right;
+}
+
+.settings-update {
+  padding-top: 16px;
+}
+.settings-update-link { width: 100%; }
+
+/* ── 窄屏：iPad 竖屏 820px 已经够宽；小屏下把触控目标保持 44px 且不横向滚动 ── */
+
+@media (max-width: 560px) {
+  .settings-body { padding: 4px 14px 20px; }
+  .settings-tabs { padding: 8px; }
+  .settings-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+  .settings-label { flex: 1 1 auto; }
+  .settings-seg { align-self: flex-start; max-width: 100%; }
+  .settings-switch { align-self: flex-start; }
+  .settings-select { max-width: 100%; align-self: stretch; }
+  .settings-btn { align-self: flex-start; }
+  .settings-close { position: static; }
+}
+
+@media (pointer: coarse) {
+  .settings-seg-btn { min-height: 44px; }
+  .settings-tab { min-height: 46px; }
+}

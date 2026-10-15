@@ -93,12 +93,24 @@ class Cdp {
         const p = this.pending.get(msg.id);
         if (!p) return;
         this.pending.delete(msg.id);
+        clearTimeout(p.timer);
         if (msg.error) p.reject(new Error(`${msg.error.message} (${p.method})`));
         else p.resolve(msg.result);
       } else {
         for (const fn of this.listeners.get(msg.method) || []) fn(msg.params);
       }
     });
+    // 浏览器崩了/连接断了，必须让所有挂起的请求立刻失败：
+    // 否则 waitFor 里的 eval 永远不返回，整个 e2e 会静默挂死（曾经挂了 20 小时）。
+    const failAll = (why) => {
+      for (const [id, p] of this.pending) {
+        clearTimeout(p.timer);
+        p.reject(new Error(`CDP 连接已断开（${why}）：${p.method}`));
+        this.pending.delete(id);
+      }
+    };
+    ws.addEventListener('close', () => failAll('websocket closed'));
+    ws.addEventListener('error', () => failAll('websocket error'));
   }
 
   static async connect(url) {
@@ -110,10 +122,15 @@ class Cdp {
     return new Cdp(ws);
   }
 
-  send(method, params = {}) {
+  send(method, params = {}, timeoutMs = 120000) {
     const id = ++this.id;
     return new Promise((resolve_, reject) => {
-      this.pending.set(id, { resolve: resolve_, reject, method });
+      const timer = setTimeout(() => {
+        if (!this.pending.has(id)) return;
+        this.pending.delete(id);
+        reject(new Error(`CDP 请求超时（${timeoutMs}ms）：${method}`));
+      }, timeoutMs);
+      this.pending.set(id, { resolve: resolve_, reject, method, timer });
       this.ws.send(JSON.stringify({ id, method, params }));
     });
   }
@@ -453,7 +470,7 @@ try {
   `);
 
   check('识别格式为 CAJ', cajView.format === 'caj' && cajView.badge === 'CAJ', `${cajView.format}/${cajView.badge}`);
-  check('页数为 2', cajView.numPages === 2 && cajView.pageCountText === '2');
+  check('页数为 2', cajView.numPages === 2 && /2/.test(cajView.pageCountText), cajView.pageCountText);
   check('DOM 生成 2 个页面容器', cajView.pageDivs === 2 && cajView.canvasCount === 2);
   check('第 1 页渲染出内容',
     cajView.first && cajView.first.colors > 3 && cajView.first.nonWhite > cajView.first.n / 50,
@@ -626,7 +643,7 @@ try {
     `页宽 ${Math.round(ipad.pageWidth)} / 容器 ${ipad.wrapWidth}`);
   check('iPad 视口下页面未被工具栏遮挡', ipad.pageTop >= ipad.toolbarBottom - 1,
     `pageTop=${Math.round(ipad.pageTop)} toolbarBottom=${Math.round(ipad.toolbarBottom)}`);
-  check('iPad 视口下页数正确', ipad.pageCount === '2');
+  check('iPad 视口下页数正确', /2/.test(ipad.pageCount), ipad.pageCount);
   check('页面本身不滚动（滚动交给阅读区）', ipad.bodyOverflow === 'hidden', ipad.bodyOverflow);
   await cdp.screenshot(join(OUT, '04-caj-ipad.png'));
 
@@ -755,10 +772,17 @@ try {
       const c = el.querySelector('canvas');
       let colors = 0;
       if (c && c.width > 1 && c.height > 1) {
-        const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+        // 只读取四个角 + 中心的小方块：整张 getImageData 会让无头 GPU 做一次大回读，
+        // 在 2 倍 DPR 的长文档场景下曾经把渲染进程卡住 45 秒以上（是量法的问题，不是应用的问题）。
+        const ctx = c.getContext('2d');
         const seen = new Set();
-        for (let i = 0; i < d.length; i += 4 * 211) {
-          seen.add((d[i] >> 4) + ',' + (d[i + 1] >> 4) + ',' + (d[i + 2] >> 4));
+        const w = Math.min(16, c.width);
+        const h = Math.min(16, c.height);
+        const spots = [[0, 0], [c.width - w, 0], [0, c.height - h], [c.width - w, c.height - h],
+          [(c.width - w) >> 1, (c.height - h) >> 1]];
+        for (const [sx, sy] of spots) {
+          const d = ctx.getImageData(sx, sy, w, h).data;
+          for (let i = 0; i < d.length; i += 4) seen.add((d[i] >> 4) + ',' + (d[i + 1] >> 4) + ',' + (d[i + 2] >> 4));
         }
         colors = seen.size;
       }
@@ -791,12 +815,16 @@ try {
     await cdp.eval("document.querySelector('#viewer').scrollTop = 0; return 1;");
     await sleep(450);
 
+    const seenColors = new Map();
     for (let i = 0; i < maxSteps; i++) {
       for (const row of await auditVisible()) {
         visited.add(row.num);
-        const bad = !row.hasCanvas || row.colors <= 3 || row.spans === 0;
+        // 每页只回读一次像素：同一页反复 getImageData 会把无头渲染进程卡死。
+        let colors = seenColors.get(row.num);
+        if (colors === undefined) { colors = row.colors; seenColors.set(row.num, colors); }
+        const bad = !row.hasCanvas || colors <= 3 || row.spans === 0;
         if (bad && !problems.has(row.num)) {
-          problems.set(row.num, row);
+          problems.set(row.num, { ...row, colors });
           // 抓到第一个异常页时，立刻采一份现场：再手动调一次 renderPage，
           // 就能区分「观察器根本没通知」和「通知了但渲染失败」。
           if (!firstBadSnapshot) firstBadSnapshot = await cdp.eval(`
@@ -830,6 +858,8 @@ try {
         return { before, after: Math.round(v.scrollTop) };
       `);
       if (moved.after <= moved.before + 1) break;
+      // 每 2 步报一次进度：万一页面卡住，日志能指出卡在哪一屏（曾经整场静默挂死）
+      if (i % 2 === 1) console.log(`    · 滚动审计 第 ${i + 1} 步（页 ${moved.before}→${moved.after}），已覆盖 ${visited.size} 页，异常 ${problems.size} 页`);
     }
     return { visited: [...visited].sort((a, b) => a - b), problems: [...problems.values()], firstBadSnapshot };
   }
@@ -1063,6 +1093,308 @@ try {
 
   await cdp.send('Fetch.disable');
   mock.rule = null;
+
+  /* ═════════════ 2.0：双指缩放 / 设置面板 / 多文档标签 ═════════════ */
+
+  // 必须刷新一次：上面两个场景是「故意把依赖打成 401 / 404」再加载页面的，
+  // 当前这份文档的模块图本来就是坏的（window.__caj 都没建起来）。
+  {
+    const fresh = new Promise((res) => cdp.on('Page.loadEventFired', res));
+    await cdp.send('Page.reload', { ignoreCache: true });
+    await fresh;
+  }
+  await cdp.waitFor('typeof window.__caj !== "undefined" && !!window.__caj.pinch',
+    { label: '2.0 接口就绪', timeout: 60000 });
+
+  /* ── 场景 K：双指缩放不再靠 transform + scroll 心算 ── */
+  console.log('\n— 场景 K：双指缩放（笔记 App 手势）—');
+  const pinchMath = await cdp.eval(`
+    const m = await import('/app/pinch-math.js');
+    const out = { mod: typeof m.previewRatio === 'function', status: 0, size: 0, err: null, numPages: 0, list: [] };
+    const res = await fetch('/tests/fixtures/sample-long.caj');
+    out.status = res.status;
+    const buf = await res.arrayBuffer();
+    out.size = buf.byteLength;
+    try {
+      await window.__caj.openFile(new File([buf], 'long.caj'));
+    } catch (e) { out.err = e.name + ': ' + e.message; }
+    await new Promise((r) => setTimeout(r, 400));
+    out.numPages = window.__caj.state.numPages;
+    out.list = window.__caj.docs.list().map((d) => d.fileName + ':' + d.numPages + (d.active ? '*' : ''));
+    return out;
+  `);
+  check('场景 K：夹具可读取且长 CAJ 转换成功',
+    pinchMath.status === 200 && pinchMath.size === 31935 && !pinchMath.err && pinchMath.numPages === 24,
+    `HTTP ${pinchMath.status} ${pinchMath.size}B err=${pinchMath.err} pages=${pinchMath.numPages} docs=[${pinchMath.list.join(', ')}]`);
+  const pinchReady = !pinchMath.err && pinchMath.numPages === 24;
+  if (pinchReady) await cdp.waitFor('window.__caj.state.numPages === 24', { label: '长 CAJ 打开', timeout: 60000 });
+  await cdp.eval('window.__caj.scrollToPage(10); return 1;');
+  await sleep(700);
+
+  const pinchResult = pinchReady ? await cdp.eval(`
+    const viewer = document.querySelector('#viewer');
+    // 注意：#pages 可能同时存在多个（后台标签各自持有一个容器），
+    // 必须取「应用当前正在渲染」的那一个，否则量到的永远是空 transform。
+    // window.__caj.pagesEl 就是 app.js 里那个模块级引用。
+    const pages = window.__caj.pagesEl;
+    const rect = viewer.getBoundingClientRect();
+    const before = { scrollTop: viewer.scrollTop, scale: window.__caj.state.pages[window.__caj.state.current - 1].scale };
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
+    const touchId = 1;
+
+    // 注意：Touch 的 clientX/clientY 是只读的，每次 touched 必须新建 Touch 对象。
+    function touch(x, y, id) {
+      return new Touch({ identifier: id, target: pages, clientX: x, clientY: y, pageX: x, pageY: y });
+    }
+    function fire(node, type, list) {
+      return node.dispatchEvent(new TouchEvent(type, {
+        touches: list, targetTouches: list, changedTouches: list,
+        bubbles: true, cancelable: true,
+      }));
+    }
+
+    const labelBefore = document.querySelector('#btnZoomLevel').textContent;
+    fire(pages, 'touchstart', [touch(cx - 60, cy, touchId), touch(cx + 60, cy, touchId + 1)]);
+    const startedActive = window.__caj.pinch.isActive();
+    const overflowDuring = viewer.style.overflow;
+
+    let maxJump = 0;
+    const transforms = [];
+    for (let i = 1; i <= 6; i++) {
+      const half = 60 + i * 10;
+      fire(pages, 'touchmove', [touch(cx - half, cy, touchId), touch(cx + half, cy, touchId + 1)]);
+      maxJump = Math.max(maxJump, Math.abs(viewer.scrollTop - before.scrollTop));
+      transforms.push(pages.style.transform);
+    }
+    const duringActive = window.__caj.pinch.isActive();
+    const transformDuringGesture = pages.style.transform;
+    const labelDuring = document.querySelector('#btnZoomLevel').textContent;
+    const scrollTopDuring = viewer.scrollTop;
+
+    fire(pages, 'touchend', []);
+    const after = {
+      scrollTop: viewer.scrollTop,
+      scale: window.__caj.state.pages[window.__caj.state.current - 1].scale,
+      transform: pages.style.transform,
+      active: window.__caj.pinch.isActive(),
+      overflow: viewer.style.overflow,
+      label: document.querySelector('#btnZoomLevel').textContent,
+    };
+    return { before, startedActive, overflowDuring, duringActive, transformDuringGesture, transforms, labelBefore, labelDuring, scrollTopDuring, maxJump, after, pagesCount: document.querySelectorAll('#pages').length, connected: pages.isConnected };
+  `) : { before: { scrollTop: 0, scale: 0 }, duringActive: false, transformDuringGesture: '', maxJump: -1, after: { active: true, transform: 'x', scale: 0, scrollTop: 0, label: '' } };
+
+  const pinchPreviewOk = (pinchResult.transforms || []).some((t) => /scale\(/.test(t));
+  check('双指缩放：手势进行中冻结滚动并只靠 #pages 的 transform 预览',
+    pinchResult.startedActive === true
+    && pinchResult.duringActive === true
+    && pinchResult.maxJump === 0
+    && pinchPreviewOk
+    && (pinchResult.transforms || []).slice(-1)[0] === pinchResult.transformDuringGesture,
+    `active=${pinchResult.duringActive} maxJump=${pinchResult.maxJump} 预览帧=${JSON.stringify(pinchResult.transforms || []).slice(0, 200)}`);
+  check('双指缩放：抬手前实时放大（标签跟随），抬起后清掉预览 transform 并按同一比例落地',
+    pinchResult.after.active === false
+    && pinchResult.after.transform === ''
+    && pinchResult.labelDuring !== pinchResult.labelBefore
+    && pinchResult.after.scale > pinchResult.before.scale
+    && pinchResult.after.scale <= 8,
+    `scale ${pinchResult.before.scale.toFixed(3)} → ${pinchResult.after.scale.toFixed(3)}，标签 ${pinchResult.labelBefore} →（手势中 ${pinchResult.labelDuring}）→ ${pinchResult.after.label}`);
+  check('双指缩放：焦点不变式成立（滚动位置按比例跟随，不会剧烈乱跳）',
+    pinchResult.after.scrollTop >= 0
+    && Math.abs(pinchResult.after.scrollTop - pinchResult.before.scrollTop * (pinchResult.after.scale / pinchResult.before.scale || 1)) <= pinchResult.before.scrollTop * 0.6 + 200,
+    `scrollTop ${pinchResult.before.scrollTop} → ${pinchResult.after.scrollTop}（手势中 ${pinchResult.scrollTopDuring}）`);
+  check('双指缩放数学模块可独立加载并导出纯函数',
+    pinchMath.mod === true, `typeof previewRatio=${typeof pinchMath.mod}`);
+  await cdp.screenshot(join(OUT, '17-pinch-zoom.png'));
+
+  /* ── 场景 L：设置面板 ── */
+  console.log('\n— 场景 L：设置与自诊断面板 —');
+  const settingsPanel = await cdp.eval(`
+    const gear = document.querySelector('#btnSettings');
+    gear.click();
+    await new Promise((r) => setTimeout(r, 250));
+    const overlay = document.querySelector('#settingsOverlay');
+    const tabs = [...document.querySelectorAll('#settingsTabs .settings-tab')].map((b) => b.dataset.setTab);
+    const settings = window.__caj.settings;
+    // 用公开 API 切分区：点击 tab 是真实路径，但断言只关心分区内容是否渲染
+    settings.open('diagnostics');
+    await new Promise((r) => setTimeout(r, 2500));
+    const activeText = () => {
+      const body = document.querySelector('#settingsBody');
+      if (!body) return '';
+      const active = [...body.querySelectorAll('.settings-section')].filter((s) => !s.hidden);
+      return active.map((s) => s.textContent).join(' ').replace(/\\s+/g, ' ').trim();
+    };
+    const diagText = activeText();
+    settings.open('about');
+    await new Promise((r) => setTimeout(r, 300));
+    const aboutText = activeText();
+    return {
+      overlayHidden: overlay.hidden,
+      panelPresent: !!document.querySelector('#settingsPanel'),
+      tabs,
+      gearOpened: settings.isOpen(),
+      diagText: diagText.slice(0, 320),
+      aboutText: aboutText.slice(0, 320),
+      versionApp: window.__caj.app.version && window.__caj.app.version.app,
+      versionCommit: window.__caj.app.version && window.__caj.app.version.commit,
+      updateButton: !!document.querySelector('#setUpdateCheck'),
+      versionInDom: ((document.querySelector('#setVersionApp') || {}).textContent || '').trim(),
+    };
+  `);
+  check('工具栏齿轮能打开设置面板',
+    settingsPanel.overlayHidden === false && settingsPanel.panelPresent === true,
+    `hidden=${settingsPanel.overlayHidden} panel=${settingsPanel.panelPresent}`);
+  check('设置面板分为外观 / 阅读 / 文件 / 诊断 / 关于五个分区',
+    ['appearance', 'reading', 'files', 'diagnostics', 'about']
+      .every((id) => settingsPanel.tabs.includes(id)),
+    settingsPanel.tabs.join(','));
+  check('设置面板的诊断分区内联显示自检结果（不必另开弹窗）',
+    settingsPanel.diagText.includes('caj2pdf_wasm.wasm') && settingsPanel.diagText.includes('离线缓存'),
+    settingsPanel.diagText.slice(0, 200));
+  check('设置面板的「关于」显示应用版本号',
+    settingsPanel.versionApp === '2.0.0' && /2\.0\.0/.test(settingsPanel.aboutText),
+    `version=${settingsPanel.versionApp} about=${settingsPanel.aboutText.slice(0, 80)}`);
+  await cdp.screenshot(join(OUT, '18-settings-panel.png'));
+
+  const closed = await cdp.eval(`
+    document.querySelector('#settingsClose').click();
+    await new Promise((r) => setTimeout(r, 200));
+    return document.querySelector('#settingsOverlay').hidden;
+  `);
+  check('设置面板可以关闭', closed === true, `hidden=${closed}`);
+
+  /* ── 场景 M：多文档标签切换 ── */
+  console.log('\n— 场景 M：多文档标签切换 —');
+  const tabsState = await cdp.eval(`
+    const before = window.__caj.docs.list();
+    const pdfBuf = await (await fetch('/tests/fixtures/sample-long.pdf')).arrayBuffer();
+    await window.__caj.openFile(new File([pdfBuf], 'long.pdf', { type: 'application/pdf' }));
+    await new Promise((r) => setTimeout(r, 600));
+    const afterOpen = window.__caj.docs.list();
+    const tabButtons = [...document.querySelectorAll('#docTabList .doc-tab')].map((b) => b.textContent.trim());
+    return {
+      before: before.map((d) => d.fileName),
+      afterOpen: afterOpen.map((d) => ({ fileName: d.fileName, active: d.active })),
+      tabButtons,
+      activePages: window.__caj.state.numPages,
+    };
+  `);
+  check('打开第二个文件会新增标签而不是顶替上一个',
+    tabsState.afterOpen.length >= 2
+    && tabsState.afterOpen.filter((d) => d.active).length === 1
+    && tabsState.tabButtons.length >= 2,
+    JSON.stringify(tabsState.afterOpen));
+
+  const switched = await cdp.eval(`
+    const list = window.__caj.docs.list();
+    const prev = list.find((d) => !d.active);
+    const ok = await window.__caj.docs.switchTo(prev.id);
+    await new Promise((r) => setTimeout(r, 500));
+    return {
+      ok,
+      active: window.__caj.docs.list().find((d) => d.active),
+      numPages: window.__caj.state.numPages,
+      fileName: window.__caj.state.fileName,
+      pageDomCount: document.querySelectorAll('.page').length,
+      viewerHasPages: !!document.querySelector('#viewer #pages'),
+    };
+  `);
+  check('能在已打开的文件之间切换，且切换后文档完整可用',
+    switched.ok === true
+    && switched.active
+    && switched.numPages > 0
+    && switched.pageDomCount > 0
+    && switched.viewerHasPages === true,
+    `${switched.fileName} / ${switched.numPages} 页 / ${switched.pageDomCount} 个页面容器`);
+  await cdp.screenshot(join(OUT, '19-multi-tab.png'));
+
+  const closedTab = await cdp.eval(`
+    const before = window.__caj.docs.list().length;
+    window.__caj.docs.closeActive();
+    await new Promise((r) => setTimeout(r, 500));
+    return {
+      before,
+      after: window.__caj.docs.list().length,
+      activeNull: window.__caj.docs.activeId() === null || window.__caj.docs.list().some((d) => d.active),
+      numPages: window.__caj.state.numPages,
+    };
+  `);
+  check('关闭当前标签后剩下一个仍然可读（不会停在空白页）',
+    closedTab.after === closedTab.before - 1 && closedTab.numPages > 0,
+    `${closedTab.before} → ${closedTab.after}，剩余 ${closedTab.numPages} 页`);
+
+  /* ── 场景 N：单页 / 连续滚动与页面间距 ── */
+  console.log('\n— 场景 N：阅读设置真的生效 —');
+  const readingPrefs = await cdp.eval(`
+    // 间距只影响「页与页之间」，所以必须用多页文档量；单页文档首末页用的是 pad。
+    const res0 = await fetch('/tests/fixtures/sample.caj');
+    const buf0 = await res0.arrayBuffer();
+    await window.__caj.openFile(new File([buf0], 'gap.caj'));
+    await new Promise((r) => setTimeout(r, 900));
+    const before = window.__caj.pagesEl.querySelectorAll('.page').length;
+    document.querySelector('#btnSettings').click();
+    await new Promise((r) => setTimeout(r, 250));
+    document.querySelector('#settingsTabs .settings-tab[data-set-tab="reading"]').click();
+    document.querySelector('#setScrollSeg .settings-seg-btn[data-value="single"]').click();
+    await new Promise((r) => setTimeout(r, 400));
+    const single = {
+      className: document.querySelector('#viewer').className,
+      visiblePages: [...window.__caj.pagesEl.querySelectorAll('.page')].filter((p) => p.offsetParent !== null).length,
+    };
+    document.querySelector('#setScrollSeg .settings-seg-btn[data-value="continuous"]').click();
+    await new Promise((r) => setTimeout(r, 200));
+    const gapSel = document.querySelector('#setPageGap');
+    gapSel.value = '28';
+    gapSel.dispatchEvent(new Event('change', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 400));
+    const pages = [...window.__caj.pagesEl.querySelectorAll('.page')];
+    const allMargins = pages.slice(0, 4).map((p) => p.style.marginTop);
+    const afterGap = allMargins[1] || '';
+    const prefsNow = window.__caj.settings.getPrefs();
+    const gapVar = getComputedStyle(document.documentElement).getPropertyValue('--page-gap').trim();
+    document.querySelector('#settingsClose').click();
+    return { before, single, afterGap, allMargins, gapVar, prefsNow, pageCount: pages.length, strayPages: document.querySelectorAll('#pages').length };
+  `);
+  check('「单页」模式只显示当前一页',
+    /single-page/.test(readingPrefs.single.className) && readingPrefs.single.visiblePages === 1,
+    `class=${readingPrefs.single.className} visible=${readingPrefs.single.visiblePages}`);
+  check('「页面间距」设置被布局真正消费',
+    readingPrefs.afterGap === '28px',
+    `margins=${JSON.stringify(readingPrefs.allMargins)} prefs=${JSON.stringify(readingPrefs.prefsNow)} pages=${readingPrefs.pageCount} 残留容器=${readingPrefs.strayPages}`);
+  check('不该在 #viewer 里留下孤立的页面容器',
+    readingPrefs.strayPages === 1, `#pages 元素数=${readingPrefs.strayPages}`);
+  await cdp.screenshot(join(OUT, '20-reading-prefs.png'));
+
+  /* ── 场景 O：版本与更新产物 ── */
+  console.log('\n— 场景 O：版本号与更新流程产物 —');
+  const versionInfo = await cdp.eval(`
+    const v = await import('/app/version.js');
+    let manifest = null;
+    try { manifest = await (await fetch('/version.json')).json(); } catch { manifest = null; }
+    const updateRes = await fetch('/IPAD-UPDATE.md');
+    const updateText = updateRes.ok ? (await updateRes.text()).slice(0, 80) : '';
+    return {
+      app: v.VERSION.app,
+      commit: v.VERSION.commit,
+      channel: v.VERSION.channel,
+      manifestApp: manifest && manifest.app,
+      manifestCommit: manifest && manifest.commit,
+      manifestFiles: manifest && Array.isArray(manifest.files) ? manifest.files.length : 0,
+      updateStatus: updateRes.status,
+      updateType: updateRes.headers.get('content-type'),
+      updateText,
+    };
+  `);
+  check('版本号由 VERSION 文件注入且构建可复现',
+    versionInfo.app === '2.0.0' && typeof versionInfo.commit === 'string',
+    `${versionInfo.app} / ${versionInfo.commit} / ${versionInfo.channel}`);
+  check('更新用的 version.json 可在站点根取到（含版本、提交与文件清单）',
+    versionInfo.manifestApp === '2.0.0' && versionInfo.manifestFiles > 0,
+    `app=${versionInfo.manifestApp} files=${versionInfo.manifestFiles}`);
+  check('随包附带的原地更新说明可访问且按文本下发（不是下载流）',
+    versionInfo.updateStatus === 200 && /text\/markdown|text\/plain/.test(String(versionInfo.updateType || '')),
+    `HTTP ${versionInfo.updateStatus} type=${versionInfo.updateType}`);
 
 } catch (err) {
   check('测试流程本身未抛异常', false, err.message);

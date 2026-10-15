@@ -17,7 +17,9 @@
  * 通过局域网 http://192.168.x.x 访问 iPad 时不会注册，但应用照常可用。
  * ========================================================================== */
 
-const VERSION = 'caj-viewer-v1';
+/* 缓存版本。改动 SHELL_FILES / VENDOR_FILES 或发布新版本时必须 bump，
+ * 否则老客户端会一直命中旧缓存（activate 时按前缀清理旧缓存）。 */
+const VERSION = 'caj-viewer-v2';
 const SHELL = `${VERSION}-shell`;
 const VENDOR = `${VERSION}-vendor`;
 
@@ -25,10 +27,23 @@ const SHELL_FILES = [
   './',
   './index.html',
   './manifest.webmanifest',
+  './version.json',
+  './IPAD-UPDATE.md',
   './app/app.js',
   './app/compat.js',
+  './app/pinch.js',
+  './app/pinch-math.js',
+  './app/docs.js',
+  './app/settings.js',
+  './app/version.js',
   './app/style.css',
+  './app/style-docs.css',
+  './app/style-settings.css',
+  './app/style-pinch.css',
   './app/icon.svg',
+  './app/icon-180.png',
+  './app/icon-192.png',
+  './app/icon-512.png',
 ];
 
 /**

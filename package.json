@@ -1,6 +1,6 @@
 {
   "name": "caj-viewer",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
   "type": "module",
   "description": "纯前端、零后端的 CAJ / KDH / HN / C8 / PDF 阅读器：CAJ 系格式转 PDF 由 WebAssembly 在 Web Worker 内完成，PDF 渲染由 PDF.js 完成，文件不出本机。",
@@ -13,7 +13,8 @@
     "serve": "node serve.js",
     "dist": "node tools/make-dist.mjs",
     "dist:lite": "node tools/make-dist.mjs --without-fonts",
-    "release": "node tools/make-release.mjs",
+    "release": "node tools/release.mjs",
+    "release:zip": "node tools/make-release.mjs",
     "icons": "node tools/make-icons.mjs",
     "fixtures": "node tests/make-fixtures.mjs",
     "test:node": "node tests/make-fixtures.mjs && node tests/smoke.mjs",

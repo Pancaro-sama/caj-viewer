@@ -281,6 +281,9 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor;
   padding: 0;
 }
 
+/* 单指只允许纵向滚动（横向留给双指手势；不用 none，否则纵向滚动失效）。 */
+#viewer { touch-action: pan-y; }
+
 /* 页面容器：比视口宽时可横向滚动，比视口窄时自动居中。
    页边距由 JS 逐页设置，保证 offsetTop 与 scrollTop 处于同一坐标系。 */
 #pages {
@@ -303,6 +306,11 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor;
   flex: 0 0 auto;
 }
 .page.is-blank { background: transparent; box-shadow: none; }
+
+/* 单页模式：一次只看一页，并把当前页居中。宽高比可能超过视口，
+   所以居中在滚动容器里做，超出部分仍可滚动查看。 */
+#viewer.single-page #pages { min-height: 100%; justify-content: center; }
+#viewer.single-page .page:not(.is-current) { display: none; }
 .page canvas { display: block; width: 100%; height: 100%; }
 .page-spinner {
   position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;

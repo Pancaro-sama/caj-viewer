@@ -324,16 +324,37 @@ python3 -m http.server 8080
 
 ## 更新已部署的版本
 
-改了代码之后重新走一遍即可：
+2.0 之后推荐用发布脚本，它会一并注入版本号并生成 `version.json`
+（应用里「设置 → 关于 → 检查更新」读的就是它）：
+
+```bash
+node tools/release.mjs            # 注入版本 → 打 release/*.zip → 写 version.json
+```
+
+只想更新静态托管（HTTPS 路线）时，重新打包并上传即可：
 
 ```bash
 node tools/make-dist.mjs          # 重新打包
 # 然后把 dist/ 重新拖到托管上（Netlify Drop 再拖一次会得到新地址）
 ```
 
+**a-Shell / 局域网路线（原地更新）** —— 把新包传到 iPad 后不用手工替换文件：
+
+```bash
+cd ~/Documents/caj-viewer
+node tools/update-ipad.mjs --from ~/Documents/caj-viewer-new --dry-run   # 演练
+node tools/update-ipad.mjs --from ~/Documents/caj-viewer-new             # 更新
+node tools/update-ipad.mjs --rollback                                    # 回退
+```
+
+它只覆盖程序文件、不动用户自己的文件，更新前备份到 `.releases/`（保留最近 3 份）。
+
 Safari 可能缓存旧外壳。`_headers` 里已经给 `index.html` / `app/*` / `sw.js` 设了 `no-cache`，
 用 Netlify 或 Cloudflare Pages 托管时无需手工清缓存；GitHub Pages 上如果看到旧版本，
 在 URL 后面加一个 `?v=2` 之类的查询串强制刷新一次即可。
+
+> 改动过 `sw.js` 的 `SHELL_FILES` / `VENDOR_FILES` 或发新版时，记得把 `sw.js` 里的
+> `VERSION` 常量加一（当前 `caj-viewer-v2`），否则老客户端会一直吃旧缓存。
 
 ---
 

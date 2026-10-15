@@ -52,6 +52,7 @@ const MIME = {
   '.pdf': 'application/pdf',
   '.caj': 'application/octet-stream',
   '.txt': 'text/plain; charset=utf-8',
+  '.md': 'text/markdown; charset=utf-8',
   '.map': 'application/json; charset=utf-8',
 };
 

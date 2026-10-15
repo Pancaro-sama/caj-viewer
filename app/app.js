@@ -7,6 +7,10 @@
 
 import * as pdfjsLib from '../vendor/pdfjs/build/pdf.min.js';
 import { convert, loadModule } from '../vendor/caj2pdf-rust/browser.js';
+import { installPinch } from './pinch.js';
+import { createDocManager } from './docs.js';
+import { installSettings } from './settings.js';
+import { VERSION } from './version.js';
 
 // 告诉 index.html 里的启动看门狗：依赖全部加载成功，模块体开始执行。
 // 因为 import 会被提升到模块体之前，这一句实际只在所有依赖都就位后才运行 ——
@@ -49,6 +53,7 @@ const el = {
   btnRotate: $('#btnRotate'),
   btnSearch: $('#btnSearch'),
   btnTheme: $('#btnTheme'),
+  btnSettings: $('#btnSettings'),
   btnDownload: $('#btnDownload'),
   fileInput: $('#fileInput'),
   sidebar: $('#sidebar'),
@@ -74,34 +79,265 @@ const el = {
   searchClose: $('#searchClose'),
 };
 
-/** 页面容器：单独一层，便于双指缩放时整体做 transform 预览。 */
-const pagesEl = document.createElement('div');
+/**
+ * 页面容器：单独一层，便于双指缩放时整体做 transform 预览。
+ * 多标签：每个文档各有自己的 #pages 节点，切换时通过 activateDocument() 换掉。
+ */
+let pagesEl = document.createElement('div');
 pagesEl.id = 'pages';
 el.viewer.append(pagesEl);
 
-/* ─────────────────────────  状态  ───────────────────────── */
-
-const state = {
-  pdf: null,
-  pages: [],
-  numPages: 0,
-  current: 1,
-  fileName: '',
-  format: 'pdf',
-  fit: 'width',            // 'width' | 'page' | 'custom'
-  customScale: 1,
-  rotation: 0,
-  invert: false,
-  theme: 'auto',
-  outline: [],
-  defaultSize: null,       // 第 1 页在 scale=1 下的 viewport，用作未加载页面的占位尺寸
-  firstPage: null,
-  objectUrl: null,
-  downloadName: 'document.pdf',
-  loadToken: 0,
+/**
+ * 运行期装配点。
+ *
+ * settings.js / docs.js / pinch.js 需要在 app.js 的布局回调里读面板偏好、
+ * 在切换文档时刷新面板，但它们都要等到 boot() 才装得上；布局函数在
+ * 用户交互之前不会跑，所以这里先放空壳，boot() 里补齐。
+ */
+const app = {
+  prefs: { pageGap: 0, scrollMode: 'continuous' },
+  settings: null,
 };
 
+/* ─────────────────────────  状态  ───────────────────────── */
+
+function mkDocState() {
+  return {
+    pdf: null,
+    pages: [],
+    numPages: 0,
+    current: 1,
+    fileName: '',
+    format: 'pdf',
+    fit: 'width',            // 'width' | 'page' | 'custom'
+    customScale: 1,
+    rotation: 0,
+    invert: false,
+    theme: 'auto',
+    outline: [],
+    defaultSize: null,       // 第 1 页在 scale=1 下的 viewport，用作未加载页面的占位尺寸
+    firstPage: null,
+    objectUrl: null,
+    downloadName: 'document.pdf',
+    loadToken: 0,
+  };
+}
+
+/** 当前活动文档的状态。多标签通过切换这个引用实现（app.js 其余代码无需改动）。 */
+let state = mkDocState();
+
 const settings = loadSettings();
+
+/* ────────────────────  多文档（标签页）上下文  ──────────────────── */
+
+/**
+ * 每个打开的文档 = 一个 docCtx：
+ *   { state, pagesEl, scrollTop, ...UI 用字段 }
+ * 活动文档的 ctx.state / ctx.pagesEl 就是模块级的 state / pagesEl，
+ * 切换文档时把这两个引用换掉即可，渲染、搜索、目录等代码完全不用知道多文档存在。
+ */
+const docDeps = {
+  loadPdf: (blob, opts = {}) => loadPdfIntoNewContext(blob, opts),
+  snapshotFromDom: () => deactivateDocument(),
+  mountInto: (ctx) => activateDocument(ctx),
+  release: (ctx) => releaseDocument(ctx),
+  showEmpty: () => closeDocument(),
+  toast,
+  getState: () => state,
+  create: newDocContext,
+  deactivate: deactivateDocument,
+  releaseActive: releaseActiveDocument,
+  switchTo: switchToDocument,
+  openFileInto,
+  resolveBlob: resolveDocBlob,
+  onActivate: null,        // 由 docs.js 注入：同步标签栏高亮
+};
+
+/**
+ * docs.js 用：把 blob 解析成一个**独立**的 docCtx（不碰当前视图）。
+ * blob 必须已经是 PDF —— CAJ/KDH 的转换留在 openFileInto 里做。
+ */
+async function loadPdfIntoNewContext(blob, { fileName = '', format = 'pdf' } = {}) {
+  const ctx = newDocContext();
+  ctx.fileName = fileName;
+  ctx.format = String(format || 'pdf').toLowerCase();
+  ctx.downloadName = suggestPdfName(fileName || 'document.pdf');
+  ctx.sourceBlob = blob;
+  const token = ++ctx.loadToken;
+  await mountPdf(blob, token, ctx);
+  if (!ctx.pdf) {
+    releaseDocument(ctx);
+    throw new Error('PDF 解析失败');
+  }
+  return ctx;
+}
+
+function newDocContext() {
+  const ctx = mkDocState();
+  ctx.pagesEl = document.createElement('div');
+  ctx.pagesEl.id = 'pages';
+  ctx.scrollTop = 0;
+  ctx.needsShells = false;
+  return ctx;
+}
+
+/** 当前活动文档的 ctx。 */
+let activeDoc = null;
+
+/** 把模块级 state / pagesEl 认领为活动文档（启动时调一次）。 */
+function adoptActiveDoc() {
+  if (activeDoc) return activeDoc;
+  activeDoc = state;
+  activeDoc.pagesEl = pagesEl;
+  activeDoc.scrollTop = el.viewer ? el.viewer.scrollTop : 0;
+  return activeDoc;
+}
+
+/** 断开两个 IntersectionObserver（多文档切换时必须断开旧的）。 */
+function detachObservers() {
+  pageObserver?.disconnect();
+  thumbObserver?.disconnect();
+}
+
+let pageObserver = null;
+let thumbObserver = null;
+
+/** 把活动文档从视图上摘下来（保留 pdf / objectUrl / 已渲染的 canvas）。 */
+function deactivateDocument() {
+  const ctx = adoptActiveDoc();
+  if (el.viewer) ctx.scrollTop = el.viewer.scrollTop;
+  ctx.current = state.current;
+  ctx.fileName = state.fileName;
+  ctx.format = state.format;
+  ctx.numPages = state.numPages;
+  ctx.downloadName = state.downloadName;
+  ctx.sourceBlob = state.sourceBlob || null;
+  // 手势进行中切文档会把 transform 留在旧节点上，先取消。
+  pinchApi?.cancel?.();
+  detachObservers();
+  if (ctx.pagesEl.isConnected) {
+    ctx.pagesEl.remove();
+    ctx.pagesEl.removeAttribute('id');
+  }
+  return ctx;
+}
+
+/** 只把 ctx 接到 DOM 与模块引用上，不做布局（后台标签 + 加载中都用这个）。 */
+function attachDocument(ctx) {
+  const already = activeDoc === ctx && ctx.pagesEl.isConnected && pagesEl === ctx.pagesEl;
+  pagesEl = ctx.pagesEl;
+  state = ctx;
+  activeDoc = ctx;
+  if (!already && !pagesEl.isConnected) {
+    // 全文档只允许有一个 id="pages" 参与渲染：后台标签的容器一直挂在
+    // ctx 上但不进 DOM，多标签切换时最容易出现重复 id；
+    // 这里统一由「挂载」这一步打 id，「摘下」时收回（见 deactivateDocument）。
+    // 另外再兜一层底：DOM 里只允许留一个 #pages，任何残留的空容器当场摘掉，
+    // 否则 viewport 上会挂着看不见的旧容器（曾经因此留下孤儿容器）。
+    for (const stray of el.viewer.querySelectorAll('#pages')) {
+      if (stray !== pagesEl) { stray.remove(); stray.removeAttribute('id'); }
+    }
+    pagesEl.id = 'pages';
+    el.viewer.append(pagesEl);
+  }
+}
+
+/** 把某个 ctx 挂成当前活动文档，并把它的页面真正画出来。 */
+function activateDocument(ctx) {
+  if (!ctx) return;
+  if (ctx === activeDoc) { syncActiveDocUi(); return; }
+  if (activeDoc) deactivateDocument();
+  attachDocument(ctx);
+
+  const fresh = ctx.numPages > 0 && !ctx.pages.length;
+  ensureDocShells();
+  attachObservers();
+  applyLayout({ preserveAnchor: false });
+  el.viewer.scrollTop = fresh ? 0 : (ctx.scrollTop || 0);
+  if (fresh) ctx.current = 1;
+  syncActiveDocUi();
+  renderVisiblePages();
+  docDeps.onActivate?.(ctx);
+}
+
+/** 把 state 里的元信息刷到工具栏（切标签 / 换文档后都要调）。 */
+function syncActiveDocUi() {
+  const n = state.numPages || 0;
+  state.current = Math.min(Math.max(1, state.current || 1), Math.max(1, n));
+  el.pageCount.textContent = n ? `/ ${n}` : '/ 0';
+  el.pageInput.value = n ? String(state.current) : '';
+  el.empty.hidden = n > 0;
+  el.btnDownload.disabled = n === 0;
+  el.fileName.textContent = state.fileName || '未打开文件';
+  el.fileName.title = state.fileName || '';
+  if (n) setFormatBadge(state.format || 'pdf');
+  else el.formatBadge.hidden = true;
+  updateCurrentFromScroll();
+}
+
+/** 真正销毁一个文档上下文（关标签时调用）。 */
+function releaseDocument(ctx) {
+  if (!ctx) return;
+  const wasActive = ctx === activeDoc;
+  if (wasActive) activeDoc = null;
+  detachObservers();
+  try { ctx.pdf?.destroy?.(); } catch { /* 忽略 */ }
+  try { if (ctx.objectUrl) URL.revokeObjectURL(ctx.objectUrl); } catch { /* 忽略 */ }
+  ctx.pdf = null;
+  ctx.objectUrl = null;
+  ctx.pages = [];
+  ctx.pagesEl.textContent = '';
+  ctx.pagesEl.remove();
+  if (wasActive) {
+    // 别把 state 留在一个已经销毁的 ctx 上
+    state = mkDocState();
+    pagesEl = document.createElement('div');
+    pagesEl.id = 'pages';
+  }
+}
+
+/** 清掉当前文档（关标签）：先摘下来再销毁。 */
+function releaseActiveDocument() {
+  const ctx = adoptActiveDoc();
+  activeDoc = null;
+  releaseDocument(ctx);
+  state = mkDocState();
+  pagesEl = document.createElement('div');
+  pagesEl.id = 'pages';
+}
+
+/** 切换标签：把另一个 ctx 挂上来。 */
+function switchToDocument(ctx) {
+  if (!ctx || ctx === activeDoc) return;
+  if (activeDoc) deactivateDocument();
+  activateDocument(ctx);
+}
+
+/** 文档管理器用：解析成可直接挂载的 PDF blob（CAJ/KDH 走转换器）。 */
+async function resolveDocBlob(source, ctx) {
+  const token = ++ctx.loadToken;
+  if (await isPdfFile(source)) return source;
+  showProgress('正在转换…', `${ctx.fileName || ''} · ${formatBytes(source.size)}`);
+  setIndeterminate(true);
+  try {
+    const wasm = await getWasm();
+    const chunks = [];
+    const sink = {
+      async writeChunk(bytes) { chunks.push(bytes); return bytes.byteLength; },
+      async flush() {},
+    };
+    const report = await convert(wasm, source, sink, {
+      signal: ctx.abortController?.signal,
+      progress: (f) => {
+        setIndeterminate(false);
+        setProgress(Math.max(0.02, Math.min(0.99, f)));
+      },
+    });
+    return Object.assign(new Blob(chunks, { type: 'application/pdf' }), { __report: report });
+  } finally {
+    if (ctx.loadToken === token) hideProgress();
+  }
+}
 
 function loadSettings() {
   const fallback = {
@@ -228,17 +464,137 @@ async function isPdfFile(file) {
     && head[3] === 0x46 && head[4] === 0x2d; // "%PDF-"
 }
 
+/**
+ * 打开一个文件。
+ *
+ * 语义：**新开一个标签**（沿用旧版「打开文件 = 换掉当前文档」的观感 ——
+ * 旧文档会留在标签栏里，随时切回来）。转换期间旧文档保持在屏幕上，
+ * 转换失败也不会把它弄丢。
+ */
 async function openFile(file) {
-  const token = ++state.loadToken;
-  closeDocument();
+  const name = file.name || 'document.caj';
+  try {
+    if (await isPdfFile(file)) {
+      // 大量 .caj 其实是内嵌 PDF（或干脆就是 PDF）。直接渲染，零拷贝、零等待。
+      await openPdfInTab(file, { fileName: name, format: 'pdf' });
+      return;
+    }
 
+    showProgress('正在转换…', `${name} · ${formatBytes(file.size)}`);
+    setIndeterminate(true);
+
+    const wasm = await getWasm();
+    const chunks = [];
+    let totalBytes = 0;
+    const sink = {
+      async writeChunk(bytes) {
+        chunks.push(bytes);
+        totalBytes += bytes.byteLength;
+        return bytes.byteLength;
+      },
+      async flush() {},
+    };
+
+    const controller = new AbortController();
+    el.btnCancel.onclick = () => controller.abort();
+
+    let report;
+    try {
+      report = await convert(wasm, file, sink, {
+        signal: controller.signal,
+        progress: (fraction) => {
+          setIndeterminate(false);
+          setProgress(Math.max(0.02, Math.min(0.99, fraction)));
+          setProgressText(`正在转换… 已读取 ${Math.round(fraction * 100)}%`);
+        },
+      });
+    } finally {
+      el.btnCancel.onclick = null;
+    }
+
+    setProgress(1);
+    setProgressText(`转换完成：${report.pagesConverted} 页 · ${formatBytes(totalBytes)}`);
+
+    const blob = new Blob(chunks, { type: 'application/pdf' });
+    hideProgress();
+
+    const id = await openPdfInTab(blob, {
+      fileName: name,
+      format: report.format || 'pdf',
+      report,
+    });
+    if (!id) toast(`打开失败：无法解析 ${name}`, 'error', 9000);
+  } catch (err) {
+    hideProgress();
+    // 这是「已经告知用户」的可预期失败，用 warn 记录即可，不必污染控制台错误流
+    console.warn('打开文件失败：', err);
+    if (err?.name === 'AbortError' || err?.code === 'CANCELLED') {
+      toast('已取消');
+      return;
+    }
+    toast(`打开失败：${describeError(err)}`, 'error', 9000);
+  }
+}
+
+/**
+ * 把「已经是 PDF」的 blob 交给文档管理器开成新标签。
+ * docs.js 的 addFromBlob 内部会先 captureActive()，所以这里不要提前 closeDocument()。
+ */
+async function openPdfInTab(blob, { fileName = '', format = 'pdf', report = null } = {}) {
+  const id = await app.docs.addFromBlob({ blob, fileName, format });
+  if (!id) return null;
+
+  if (report?.omittedPages?.length) {
+    toast(`有 ${report.omittedPages.length} 页无法恢复，已用空白页替代`, 'error', 8000);
+  }
+  if (report?.substitutedGlyphs) {
+    toast(`有 ${report.substitutedGlyphs} 个字形使用了近似替代`, '', 6000);
+  }
+  if (report?.outlineOmitted) {
+    toast('本文档的目录结构尚未验证，已省略书签', '', 5000);
+  }
+  return id;
+}
+
+/** 在新标签里打开一个文件（标签栏的 ＋ 与拖放多文件用）。 */
+async function openFileInNewTab(file) {
+  return openFile(file);
+}
+
+/** 造一个空白文档并挂到前台，返回它的 ctx。 */
+function beginBlankDocument() {
+  const previous = activeDoc;
+  const ctx = newDocContext();
+  ctx.fileName = '';
+  if (previous) deactivateDocument();
+  attachDocument(ctx);
+  el.fileName.textContent = '正在打开…';
+  el.fileName.title = '';
+  el.formatBadge.hidden = true;
+  el.empty.hidden = true;
+  el.pageCount.textContent = '/ 0';
+  el.pageInput.value = '';
+  el.btnDownload.disabled = true;
+  el.paneOutline.textContent = '';
+  el.paneThumbs.textContent = '';
+  docDeps.onActivate?.(ctx);
+  return ctx;
+}
+
+async function openFileInto(ctx, file) {
+  const token = ++ctx.loadToken;
+  if (state !== ctx) attachDocument(ctx);
   const name = file.name || 'document.caj';
   el.fileName.textContent = name;
   el.fileName.title = name;
   el.formatBadge.hidden = true;
+  ctx.fileName = name;
 
   const controller = new AbortController();
+  ctx.abortController = controller;
+  ctx.sourceBlob = file;
   el.btnCancel.onclick = () => controller.abort();
+  const stale = () => ctx.loadToken !== token;
 
   try {
     let blob;
@@ -254,7 +610,7 @@ async function openFile(file) {
       setIndeterminate(true);
 
       const wasm = await getWasm();
-      if (token !== state.loadToken) return;
+      if (stale()) return;
 
       const chunks = [];
       let totalBytes = 0;
@@ -275,7 +631,7 @@ async function openFile(file) {
           setProgressText(`正在转换… 已读取 ${Math.round(fraction * 100)}%`);
         },
       });
-      if (token !== state.loadToken) return;
+      if (stale()) return;
 
       format = report.format;
       blob = new Blob(chunks, { type: 'application/pdf' });
@@ -283,14 +639,15 @@ async function openFile(file) {
       setProgressText(`转换完成：${report.pagesConverted} 页 · ${formatBytes(totalBytes)}`);
     }
 
-    if (token !== state.loadToken) return;
+    if (stale()) return;
 
-    state.format = format;
-    state.fileName = name;
-    state.downloadName = suggestPdfName(name);
+    ctx.format = format;
+    ctx.fileName = name;
+    ctx.downloadName = suggestPdfName(name);
 
-    await mountPdf(blob, token);
-    if (token !== state.loadToken) return;
+    await mountPdf(blob, token, ctx);
+    if (stale()) return;
+    state = ctx;
 
     setFormatBadge(format);
     hideProgress();
@@ -331,12 +688,14 @@ function setFormatBadge(format) {
 
 /* ─────────────────────────  挂载 PDF  ───────────────────────── */
 
-async function mountPdf(blob, token) {
-  if (state.objectUrl) URL.revokeObjectURL(state.objectUrl);
-  state.objectUrl = URL.createObjectURL(blob);
+async function mountPdf(blob, token, ctx = state) {
+  // 注意：ctx 可能是个还没激活的后台标签，所以这里一律写 ctx.* 而不是 state.*。
+  // 后台标签只做「取 pdf + 记下第 1 页尺寸」，DOM 等 activateDocument() 再补。
+  if (ctx.objectUrl) URL.revokeObjectURL(ctx.objectUrl);
+  ctx.objectUrl = URL.createObjectURL(blob);
 
   const pdf = await pdfjsLib.getDocument({
-    url: state.objectUrl,
+    url: ctx.objectUrl,
     cMapUrl: new URL('cmaps/', PDFJS).href,
     cMapPacked: true,
     standardFontDataUrl: new URL('standard_fonts/', PDFJS).href,
@@ -345,35 +704,51 @@ async function mountPdf(blob, token) {
     stopAtErrors: false, // 转换器产出的 PDF 可能带瑕疵，尽量渲染而不是报错
   }).promise;
 
-  if (token !== state.loadToken) { pdf.destroy(); return; }
+  if (ctx.loadToken !== token) { pdf.destroy(); return; }
 
-  state.pdf = pdf;
-  state.numPages = pdf.numPages;
-  state.current = 1;
+  ctx.pdf = pdf;
+  ctx.numPages = pdf.numPages;
+  ctx.current = 1;
 
-  // 以第 1 页作为全文档的尺寸模板：滚动条长度从第一帧起就是准的，
-  // 后续滚动到未加载页面时不会出现高度跳变。
-  state.defaultSize = null;
-  state.firstPage = null;
+  ctx.defaultSize = null;
+  ctx.firstPage = null;
   try {
     const first = await pdf.getPage(1);
-    state.firstPage = first;
-    state.defaultSize = first.getViewport({ scale: 1, rotation: pageRotation(first) });
+    ctx.firstPage = first;
+    ctx.defaultSize = first.getViewport({ scale: 1, rotation: pageRotation(first) });
   } catch { /* 拿不到就退回逐页布局 */ }
+  if (ctx.loadToken !== token) return;
+
+  if (ctx !== state || ctx.needsShells) {
+    // 后台标签（或刚被挂上前台、但还没建过 DOM 的标签）：
+    // 不建 DOM，等 activateDocument() 里 ensureDocShells() 补上。
+    ctx.needsShells = true;
+    return;
+  }
+
   el.pageCount.textContent = String(pdf.numPages);
   el.pageInput.value = '1';
 
-  buildPageShells();
-  state.outline = [];
-  buildOutline();
-  buildThumbnails();
+  ensureDocShells();
 
   attachObservers();
   applyLayout({ preserveAnchor: false });
   scrollToPage(1, 'auto');
   renderVisiblePages();
+}
 
+/** 当前活动文档还没有页面 DOM 时补上（内部布局 → 目录 → 缩略图）。 */
+function ensureDocShells() {
+  if (!state.pdf || state.pages.length) { state.needsShells = false; return; }
+  el.pageCount.textContent = String(state.numPages);
+  if (!el.pageInput.value) el.pageInput.value = '1';
+  buildPageShells();
+  state.needsShells = false;
+  state.outline = [];
+  buildOutline();
+  buildThumbnails();
   // 目录解析比较慢，放到首屏之后再处理，避免拖慢打开速度。
+  const token = state.loadToken;
   loadOutline().then(() => {
     if (token !== state.loadToken) return;
     buildOutline();
@@ -456,15 +831,23 @@ function placeholderBox(p) {
   };
 }
 
+/** 设置面板可见时把最新状态同步过去（面板不存在时静默跳过）。 */
+function refreshSettingsUi() {
+  try { app.settings?.refresh?.(); } catch { /* 面板不该拖垮阅读 */ }
+}
+
 /** 走一遍布局；preserveAnchor 保证缩放/旋转后视线不跳。 */
 function applyLayout({ preserveAnchor = true } = {}) {
   if (!state.pdf) return;
   const anchor = preserveAnchor ? captureAnchor() : null;
   const pad = padPx();
+  const gap = Math.max(0, Number(app.prefs.pageGap) || 0);
+
+  el.viewer.classList.toggle('single-page', app.prefs.scrollMode === 'single');
 
   for (const p of state.pages) {
-    p.div.style.marginTop = p.num === 1 ? `${pad}px` : '0px';
-    p.div.style.marginBottom = `${pad}px`;
+    p.div.style.marginTop = p.num === 1 ? `${pad}px` : `${gap}px`;
+    p.div.style.marginBottom = p.num === state.pages.length ? `${pad}px` : `${gap}px`;
 
     if (p.pdfPage) {
       applyPageBox(p, computeScale(p.pdfPage));
@@ -484,6 +867,7 @@ function applyLayout({ preserveAnchor = true } = {}) {
   el.btnFitWidth.classList.toggle('is-on', state.fit === 'width');
   el.btnFitPage.classList.toggle('is-on', state.fit === 'page');
   updateCurrentFromScroll();
+  refreshSettingsUi();
 }
 
 function currentPercent() {
@@ -691,8 +1075,6 @@ function prunePages() {
 
 /* ─────────────────────────  可见性观察  ───────────────────────── */
 
-let pageObserver = null;
-
 function attachObservers() {
   pageObserver?.disconnect();
   pageObserver = new IntersectionObserver((entries) => {
@@ -744,20 +1126,29 @@ el.viewer.addEventListener('scroll', () => {
 }, { passive: true });
 
 function updateCurrentFromScroll() {
-  if (!state.pages.length) return;
-  const mid = el.viewer.scrollTop + el.viewer.clientHeight * 0.35;
+  if (state.pages.length) {
+    const mid = el.viewer.scrollTop + el.viewer.clientHeight * 0.35;
 
-  let best = state.pages[0];
-  for (const p of state.pages) {
-    if (p.div.offsetTop <= mid) best = p;
-    else break;
+    let best = state.pages[0];
+    for (const p of state.pages) {
+      if (p.div.offsetTop <= mid) best = p;
+      else break;
+    }
+    if (best.num !== state.current) {
+      state.current = best.num;
+      el.pageInput.value = String(best.num);
+      markOutlineActive(best.num);
+      markThumbActive(best.num);
+      prunePages();
+    }
   }
-  if (best.num !== state.current) {
-    state.current = best.num;
-    el.pageInput.value = String(best.num);
-    markOutlineActive(best.num);
-    markThumbActive(best.num);
-    prunePages();
+  syncCurrentPageMarker();
+}
+
+/** 单页模式靠 .is-current 决定哪一页可见；切文档时也要重标一次。 */
+function syncCurrentPageMarker() {
+  for (const p of state.pages) {
+    p.div.classList.toggle('is-current', p.num === state.current);
   }
 }
 
@@ -769,6 +1160,7 @@ function scrollToPage(num, behavior = 'auto') {
   el.viewer.scrollTo({ top: p.div.offsetTop, behavior });
   markOutlineActive(p.num);
   markThumbActive(p.num);
+  syncCurrentPageMarker();
 }
 
 /* ─────────────────────────  缩放  ───────────────────────── */
@@ -800,7 +1192,8 @@ el.btnZoomLevel.addEventListener('click', () => zoomTo(1 / SCALE_PER_PERCENT));
 el.btnFitWidth.addEventListener('click', () => setFit('width'));
 el.btnFitPage.addEventListener('click', () => setFit('page'));
 
-el.btnRotate.addEventListener('click', () => {
+/** 顺时针旋转 90°（工具栏按钮与设置面板共用）。 */
+function rotate() {
   state.rotation = (state.rotation + 90) % 360;
   if (state.firstPage) {
     state.defaultSize = state.firstPage.getViewport({ scale: 1, rotation: pageRotation(state.firstPage) });
@@ -809,7 +1202,10 @@ el.btnRotate.addEventListener('click', () => {
   applyLayout({ preserveAnchor: true });
   renderVisiblePages();
   invalidateThumbnails();
-});
+  refreshSettingsUi();
+}
+
+el.btnRotate.addEventListener('click', rotate);
 
 /**
  * 旋转后缩略图必须重画：renderThumb 用 p.thumbDone 做「已画过」的标记，
@@ -839,10 +1235,38 @@ el.viewer.addEventListener('wheel', (e) => {
   zoomBy(e.deltaY < 0 ? 1.1 : 1 / 1.1);
 }, { passive: false });
 
+/* 双指缩放：几何与手势状态机都在 app/pinch.js（唯一入口 installPinch）。
+   这里只负责把 app.js 里的布局/缩放/锚点能力喂给它，并做两处适配：
+     · pagesEl 用 getter 转发 —— 多标签下页面容器会被换掉；
+     · 手势进行中切换文档要取消手势（否则变换会留在旧节点上）。 */
+const pagesElProxy = {
+  get style() { return pagesEl.style; },
+  get children() { return pagesEl.children; },
+  get classList() { return pagesEl.classList; },
+  getBoundingClientRect: () => pagesEl.getBoundingClientRect(),
+};
+
+const pinchApi = installPinch({
+  viewer: el.viewer,
+  pagesEl: pagesElProxy,
+  captureAnchorAtClientY,
+  restoreAnchor,
+  applyLayout,
+  zoomTo,
+  setFit,
+  getStartScale: () => state.pages[state.current - 1]?.scale || state.customScale,
+  getZoomLabel: () => el.btnZoomLevel,
+  SCALE_PER_PERCENT, ZOOM_MIN, ZOOM_MAX,
+  isReady: () => !!state.pdf && state.numPages > 0,
+});
+
 /* 触屏双击：在「适应宽度」与 220% 之间切换 */
 let lastTapAt = 0;
 el.viewer.addEventListener('pointerup', (e) => {
   if (e.pointerType === 'mouse' || !state.pdf) return;
+  // 双指抬起时第二根手指的 pointerup 可能晚于 touchend，
+  // 只用 isActive() 会把它误判成双击。
+  if (pinchApi.isActive() || pinchApi.recentlyActive(400)) return;
   if (e.target.closest('.textLayer')) return; // 不干扰选词
   const now = performance.now();
   if (now - lastTapAt > 320) { lastTapAt = now; return; }
@@ -853,67 +1277,139 @@ el.viewer.addEventListener('pointerup', (e) => {
   restoreAnchor(anchor);
 }, { passive: true });
 
-/* ─────────────────────────  双指缩放  ───────────────────────── */
+/* ─────────────────────────  多文档 / 设置面板  ───────────────────────── */
 
-const pinch = {
-  active: false, startDist: 0, startScale: 1, ratio: 1,
-  docY: 0, docX: 0, focalY: 0, focalX: 0, anchor: null,
-};
-
-function touchDist(t) {
-  return Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
-}
-
-el.viewer.addEventListener('touchstart', (e) => {
-  if (e.touches.length !== 2 || !state.pdf) return;
-  const rect = el.viewer.getBoundingClientRect();
-  pinch.active = true;
-  pinch.ratio = 1;
-  pinch.startDist = Math.max(1, touchDist(e.touches));
-  pinch.startScale = state.pages[state.current - 1]?.scale || state.customScale;
-  pinch.focalX = (e.touches[0].clientX + e.touches[1].clientX) / 2 - rect.left;
-  pinch.focalY = (e.touches[0].clientY + e.touches[1].clientY) / 2 - rect.top;
-  pinch.docX = el.viewer.scrollLeft + pinch.focalX;
-  pinch.docY = el.viewer.scrollTop + pinch.focalY;
-  pinch.anchor = captureAnchorAtClientY((e.touches[0].clientY + e.touches[1].clientY) / 2);
-}, { passive: true });
-
-el.viewer.addEventListener('touchmove', (e) => {
-  if (!pinch.active || e.touches.length !== 2) return;
-  e.preventDefault();
-
-  const k = Math.max(0.1, Math.min(20, touchDist(e.touches) / pinch.startDist));
-  pinch.ratio = k;
-
-  // 手势期间只做视觉预览，并补偿滚动，让焦点停在手指下。
-  pagesEl.style.transformOrigin = '0 0';
-  pagesEl.style.transform = `scale(${k})`;
-  el.viewer.scrollLeft = pinch.docX * k - pinch.focalX;
-  el.viewer.scrollTop = pinch.docY * k - pinch.focalY;
-
-  const target = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, pinch.startScale * k));
-  el.btnZoomLevel.textContent = `${Math.round(target / SCALE_PER_PERCENT)}%`;
-}, { passive: false });
-
-function endPinch() {
-  if (!pinch.active) return;
-  pinch.active = false;
-  pagesEl.style.transform = '';
-  const k = pinch.ratio;
-  if (Math.abs(k - 1) > 0.02) {
-    // 先撤掉预览变换，再落到真实缩放，最后把焦点还原到手指位置。
-    zoomTo(pinch.startScale * k);
-    restoreAnchor(pinch.anchor);
-    renderVisiblePages();
-  } else {
-    applyLayout();
+/** 设置面板要用的字段（值类型，面板只读）。 */
+function sidebarDefaultPref() {
+  try {
+    const raw = JSON.parse(localStorage.getItem('cajviewer.settings') || '{}');
+    return typeof raw.sidebar === 'boolean' ? raw.sidebar : true;
+  } catch {
+    return true;
   }
 }
 
-el.viewer.addEventListener('touchend', (e) => {
-  if (pinch.active && e.touches.length < 2) endPinch();
-}, { passive: true });
-el.viewer.addEventListener('touchcancel', endPinch, { passive: true });
+/** 清掉恢复索引（IndexedDB 里缓存的文件与 localStorage 索引），打开的标签不受影响。 */
+async function clearRecentFiles() {
+  let cleared = false;
+  try {
+    if (typeof indexedDB !== 'undefined') {
+      await new Promise((resolve) => {
+        const request = indexedDB.deleteDatabase('cajviewer');
+        request.onsuccess = () => resolve();
+        request.onerror = () => resolve();
+        request.onblocked = () => resolve();
+      });
+      cleared = true;
+    }
+  } catch { /* 隐私模式 / 无 IndexedDB 时静默降级 */ }
+  try {
+    localStorage.removeItem('cajviewer.docs');
+    cleared = true;
+  } catch { /* 忽略 */ }
+  return cleared;
+}
+
+/** 设置面板（app/settings.js）看到的「应用门面」。 */
+const appFacade = {
+  state: () => state,
+  version: VERSION,
+  docs: null,        // 构造完 docs 之后补上
+  SCALE_PER_PERCENT,
+  updateUrl: '',     // 有发布页（GitHub Pages / 静态托管）时填这里
+  /**
+   * 取站点根目录的版本清单。发布产物由 tools/make-version-json.mjs 生成；
+   * 本地开发环境没有它也很正常，返回 null 即可（设置面板会显示为「未配置发布源」）。
+   */
+  async fetchPublishedVersion() {
+    const res = await fetch(new URL('../version.json', import.meta.url), { cache: 'no-store' });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data && typeof data.app === 'string' ? data : null;
+  },
+  toast,
+  runSelfCheck,
+  warmOfflineCache,
+  scrollToPage,
+  setFit,
+  zoomTo,
+  rotate,
+  invalidateThumbnails,
+  openFile,
+  closeDocument,
+  saveSettings,
+  applyTheme,
+  setTheme(mode) {
+    state.theme = (mode === 'light' || mode === 'dark') ? mode : 'auto';
+    applyTheme();
+    saveSettings();
+    refreshSettingsUi();
+  },
+  setInvert(on) {
+    state.invert = !!on;
+    el.viewer.classList.toggle('invert-pages', state.invert);
+    saveSettings();
+  },
+  getSidebarDefault: sidebarDefaultPref,
+  setSidebarDefault(on) {
+    settings.sidebar = !!on;
+    saveSettings();
+  },
+  setPageGap(px) {
+    app.prefs.pageGap = Math.max(0, Number(px) || 0);
+    applyLayout();
+  },
+  setScrollMode(mode) {
+    app.prefs.scrollMode = mode === 'single' ? 'single' : 'continuous';
+    applyLayout({ preserveAnchor: false });
+    renderVisiblePages();
+  },
+  clearRecentFiles,
+};
+
+/**
+ * 文档管理器：标签栏、切换、关闭、IndexedDB 持久化都在 docs.js 里。
+ * 这里只把 app.js 的文档能力喂给它。
+ */
+app.docs = createDocManager({
+  viewer: el.viewer,
+  el: { tabs: $('#docTabs'), tabList: $('#docTabList'), btnNewTab: $('#btnNewTab') },
+  state,
+  api: {
+    ...docDeps,
+    addPdfBlob: (blob, fileName, format) => openPdfInTab(blob, { fileName, format }),
+    openFilePicker: pickFile,
+  },
+});
+appFacade.docs = app.docs;
+
+// 标签切换成功后同步设置面板里的「当前文档」列表
+app.docs.onActivate = () => {
+  refreshSettingsUi();
+};
+
+/**
+ * 设置面板的安装必须留到 boot() 之后再做：
+ * appFacade 里的字段是 module 级 const / function，模块求值阶段还会撞上
+ * 暂时性死区；boot() 跑的时候整个模块已经求值完毕。
+ */
+function ensureSettingsPanel() {
+  if (app.settings) return app.settings;
+  app.settings = installSettings({ app: appFacade, overlayEl: $('#settingsOverlay') });
+  app.prefs = app.settings.getPrefs();
+  // 阅读偏好由设置面板持久化在另一个 key 里；不在这里回灌，重启后
+  // 页面间距与单页模式就只是显示对了、布局没跟上（用户会以为设置丢了）。
+  applyReadingPrefs();
+  return app.settings;
+}
+
+/** 把 app.prefs 落到布局上（文档还没打开时 applyLayout 会自行跳过）。 */
+function applyReadingPrefs() {
+  el.viewer.classList.toggle('single-page', app.prefs.scrollMode === 'single');
+  if (state.pdf) applyLayout();
+}
+
+/* ─────────────────────────  符号预览（仅双击用）  ───────────────────────── */
 
 /* ─────────────────────────  页码导航  ───────────────────────── */
 
@@ -1044,8 +1540,6 @@ function buildThumbnails() {
   }
   el.paneThumbs.append(frag);
 }
-
-let thumbObserver = null;
 
 function observeThumbs() {
   thumbObserver?.disconnect();
@@ -1397,29 +1891,17 @@ function setIndeterminate(on) {
 
 /* ─────────────────────────  关闭 / 清理  ───────────────────────── */
 
+/** 彻底关闭当前文档（回到空状态）。多标签下的「替换打开」不走这里。 */
 function closeDocument() {
-  pageObserver?.disconnect();
-  thumbObserver?.disconnect();
-  for (const p of state.pages) {
-    p.renderTask?.cancel?.();
-    p.textLayer?.cancel?.();
-  }
-  try { state.pdf?.destroy?.(); } catch { /* 忽略 */ }
-
-  state.pdf = null;
-  state.pages = [];
-  state.numPages = 0;
-  state.current = 1;
-  state.outline = [];
-  state.defaultSize = null;
-  state.firstPage = null;
-  pagesEl.textContent = '';
+  releaseActiveDocument();
   el.paneOutline.textContent = '';
   el.paneThumbs.textContent = '';
   el.pageCount.textContent = '0';
   el.pageInput.value = '1';
   el.btnDownload.disabled = true;
   el.empty.hidden = false;
+  el.fileName.textContent = '未打开文件';
+  el.formatBadge.hidden = true;
 }
 
 addEventListener('beforeunload', () => {
@@ -1462,6 +1944,9 @@ addEventListener('resize', () => {
 async function boot() {
   applyTheme();
 
+  ensureSettingsPanel();
+  $('#btnSettings')?.addEventListener('click', () => app.settings.toggle());
+
   state.fit = settings.fit || 'width';
   state.customScale = Number(settings.scale) > 0 ? Number(settings.scale) : 1;
   state.invert = !!settings.invert;
@@ -1490,6 +1975,11 @@ async function boot() {
   getWasm().catch((err) => console.warn('WASM 预加载失败，CAJ 转换可能不可用', err));
 
   registerServiceWorker();
+
+  // 恢复上次没关掉的标签（IndexedDB 里缓存过的文件）。失败不影响单文档使用。
+  app.docs.restoreSession()
+    .then(() => refreshSettingsUi())
+    .catch((err) => console.warn('恢复上次的标签失败：', err));
 }
 
 function registerServiceWorker() {
@@ -1719,6 +2209,9 @@ async function runSelfCheck() {
         }]
       : undefined,
   });
+
+  // 设置面板的「诊断」分区直接消费这个结构（rows 是 [名称, 值, 是否异常] 三元组）
+  return { rows, tips };
 }
 
 el.btnSelfCheck?.addEventListener('click', () => {
@@ -1728,7 +2221,15 @@ el.btnSelfCheck?.addEventListener('click', () => {
 /* 自动化测试与调试用的最小接口。不影响正常使用。 */
 globalThis.__caj = {
   openFile,
-  state,
+  openPdfInTab,
+  rotate,
+  docs: app.docs,
+  get settings() { return app.settings; },
+  app: appFacade,
+  get pinch() { return pinchApi; },
+  get state() { return state; },
+  get activeDocument() { return activeDoc; },
+  get pagesEl() { return pagesEl; },
   scrollToPage,
   setFit,
   zoomTo,
@@ -1741,6 +2242,7 @@ globalThis.__caj = {
   releasePage,
   runSelfCheck,
   warmOfflineCache,
+  clearRecentFiles,
 };
 
 // boot 出错也要让用户看得见 —— 否则又是一次「界面在但点不动」的静默失败

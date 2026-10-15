@@ -26,3 +26,8 @@ Thumbs.db
 
 # 随手 AirDrop 到 iPad 的 zip（用 node tools/make-release.mjs 重建）
 release/
+
+# update-ipad.mjs 的原地更新备份
+.releases/
+.caj-version.json
+
