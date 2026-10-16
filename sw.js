@@ -19,7 +19,7 @@
 
 /* 缓存版本。改动 SHELL_FILES / VENDOR_FILES 或发布新版本时必须 bump，
  * 否则老客户端会一直命中旧缓存（activate 时按前缀清理旧缓存）。 */
-const VERSION = 'caj-viewer-v2';
+const VERSION = 'caj-viewer-v3';
 const SHELL = `${VERSION}-shell`;
 const VENDOR = `${VERSION}-vendor`;
 
@@ -313,15 +313,39 @@ function htmlAsFailure(res) {
   });
 }
 
-/** 导航：缓存优先 + 后台更新；只有网络失败（离线）时才回退缓存。 */
+/**
+ * 导航：**网络优先**（在线时永远拿到刚发布的版本），失败或超时才回退缓存。
+ *
+ * 原来是「缓存优先 + 后台更新」：打开永远命中上一次的 HTML，新版本只能等下一次
+ * 冷启动才生效。iPad 上加到主屏后应用几乎不冷启动，结果就是「代码已经发布，
+ * 用户看到的还是旧界面」—— 排查成本极高（用户报的问题在本地永远复现不出来）。
+ * 导航请求很小，多这一趟往返换「发布即生效」是划算的；离线时 2.5s 内没网就落到
+ * 缓存，可用性不受影响。
+ */
 async function handleNavigation(request) {
   const cache = await caches.open(SHELL);
-  const hit = await cache.match(request, { ignoreSearch: true });
-  const network = fetch(request).then((res) => {
-    if (res.ok) cache.put(request, res.clone()).catch(() => {});
-    return res;
-  }).catch(async () => hit || cache.match('./index.html', { ignoreSearch: true }));
-  return hit || network;
+  const fallback = async () => (await cache.match(request, { ignoreSearch: true }))
+    || cache.match('./index.html', { ignoreSearch: true });
+
+  let timer = 0;
+  try {
+    const network = fetch(request).then((res) => {
+      if (res.ok) cache.put(request, res.clone()).catch(() => {});
+      return res;
+    });
+    const res = await Promise.race([
+      network,
+      new Promise((resolve) => { timer = setTimeout(() => resolve(null), 2500); }),
+    ]);
+    if (res && !isHtmlResponse(res)) return res;
+    // 拿到 HTML 兜底页（网关拦截）时不能当真页面用，交给缓存。
+    if (res) return (await fallback()) || htmlAsFailure(res);
+    return (await fallback()) || await network;
+  } catch {
+    return (await fallback()) || new Response('', { status: 504, statusText: 'Network Error' });
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** vendor 运行时：缓存优先；不缓存 HTML 兜底页与 206 分片。 */

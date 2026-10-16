@@ -188,7 +188,17 @@ const PANEL_HTML = `
 
       <div id="setDiagTips" class="settings-tips"></div>
 
+      <div class="settings-row">
+        <div class="settings-label">
+          <span>自动修复显示异常</span>
+          <small>打开/切换文档后自动修掉文本层与缩放异常，不用手动点</small>
+        </div>
+        <button type="button" class="settings-btn is-on" id="setAutoHeal"
+                aria-pressed="true" role="switch">已开启</button>
+      </div>
+
       <div class="settings-actions">
+        <button type="button" class="settings-btn settings-btn-primary" id="setRepair">一键修复</button>
         <button type="button" class="settings-btn" id="setWarmCache">预热离线包</button>
         <button type="button" class="settings-btn" id="setExportDiag">导出诊断报告</button>
         <button type="button" class="settings-btn" id="setShowDiag">完整诊断面板</button>
@@ -290,6 +300,8 @@ export function installSettings({ app, overlayEl } = {}) {
   const diagTableWrap = q('#setDiagTableWrap');
   const diagTipsEl = q('#setDiagTips');
   const diagRunBtn = q('#setDiagRun');
+  const repairBtn = q('#setRepair');
+  const autoHealBtn = q('#setAutoHeal');
   const warmCacheBtn = q('#setWarmCache');
   const exportDiagBtn = q('#setExportDiag');
   const showDiagBtn = q('#setShowDiag');
@@ -764,6 +776,7 @@ export function installSettings({ app, overlayEl } = {}) {
     setSeg(scrollSeg, prefs.scrollMode);
 
     renderDocList();
+    renderAutoHeal();
     renderAbout();
   }
 
@@ -906,8 +919,49 @@ export function installSettings({ app, overlayEl } = {}) {
     }
   });
 
+  // 自动修复开关：默认开；关掉后打开/切换文档不再自动体检
+  function autoHealState() {
+    if (typeof app.autoSelfHeal === 'boolean') return app.autoSelfHeal;
+    return true;
+  }
+  function renderAutoHeal() {
+    setSwitch(autoHealBtn, autoHealState());
+    autoHealBtn.textContent = autoHealState() ? '已开启' : '已关闭';
+  }
+  if (autoHealBtn) {
+    autoHealBtn.addEventListener('click', () => {
+      const next = !autoHealState();
+      if (typeof app.setAutoSelfHeal === 'function') app.setAutoSelfHeal(next);
+      renderAutoHeal();
+    });
+  }
+
   // 诊断
   diagRunBtn.addEventListener('click', () => runDiag());
+
+  // 一键修复：重建文本层与布局，不重新打开文件、不丢标签
+  repairBtn.addEventListener('click', async () => {
+    if (typeof app.repairRuntime !== 'function') {
+      if (typeof app.toast === 'function') app.toast('当前版本不支持一键修复', 'error');
+      return;
+    }
+    repairBtn.disabled = true;
+    const original = repairBtn.textContent;
+    repairBtn.textContent = '修复中…';
+    setDiagStatus('正在重建文本层与布局…', false);
+    try {
+      const res = await app.repairRuntime({ reason: '设置面板' });
+      const left = (res && res.remaining ? res.remaining.filter((i) => i.auto) : []).length;
+      setDiagStatus(left ? `修复后仍有 ${left} 项异常，请导出诊断报告` : `已修复 ${res?.fixed?.length || 0} 项`, !!left);
+    } catch (err) {
+      setDiagStatus(`修复失败：${err.message}`, true);
+      if (typeof app.toast === 'function') app.toast(`修复失败：${err.message}`, 'error');
+    } finally {
+      repairBtn.disabled = false;
+      repairBtn.textContent = original;
+      await runDiag();
+    }
+  });
 
   warmCacheBtn.addEventListener('click', async () => {
     if (typeof app.warmOfflineCache !== 'function') {

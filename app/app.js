@@ -70,6 +70,17 @@ const el = {
   progressBar: $('#progressBar'),
   progressPercent: $('#progressPercent'),
   btnCancel: $('#btnCancel'),
+  exportOverlay: $('#exportOverlay'),
+  exportDetail: $('#exportDetail'),
+  exportName: $('#exportName'),
+  exportMode: $('#exportMode'),
+  exportLinkBox: $('#exportLinkBox'),
+  exportLink: $('#exportLink'),
+  exportLinkHint: $('#exportLinkHint'),
+  exportHint: $('#exportHint'),
+  btnExportSave: $('#btnExportSave'),
+  btnExportCopy: $('#btnExportCopy'),
+  btnExportCancel: $('#btnExportCancel'),
   toast: $('#toast'),
   searchBar: $('#searchBar'),
   searchInput: $('#searchInput'),
@@ -118,6 +129,7 @@ function mkDocState() {
     defaultSize: null,       // 第 1 页在 scale=1 下的 viewport，用作未加载页面的占位尺寸
     firstPage: null,
     objectUrl: null,
+    pdfBlob: null,           // 转换完成的 PDF 本体（保存 / 分享 / 显示大小用）
     downloadName: 'document.pdf',
     loadToken: 0,
   };
@@ -178,6 +190,7 @@ function newDocContext() {
   ctx.pagesEl.id = 'pages';
   ctx.scrollTop = 0;
   ctx.needsShells = false;
+  ctx.outline = null;   // 目录按文档缓存（null = 还没解析过）
   return ctx;
 }
 
@@ -250,14 +263,52 @@ function activateDocument(ctx) {
   attachDocument(ctx);
 
   const fresh = ctx.numPages > 0 && !ctx.pages.length;
+  state.outline = Array.isArray(ctx.outline) ? ctx.outline : [];
+  const needOutline = !!ctx.pdf && !Array.isArray(ctx.outline);
+
   ensureDocShells();
   attachObservers();
   applyLayout({ preserveAnchor: false });
   el.viewer.scrollTop = fresh ? 0 : (ctx.scrollTop || 0);
   if (fresh) ctx.current = 1;
   syncActiveDocUi();
+  restoreDocPanes();
   renderVisiblePages();
+
+  // 回到一个目录还没解析完就被切走的标签（解析结果会被竞态检查丢弃）时，
+  // 这里补一次解析 —— 否则它的目录面板会永远空着（用户报的「目录索引不见」）。
+  if (needOutline) {
+    const token = ctx.loadToken;
+    const pdf = ctx.pdf;
+    loadOutline(pdf).then(() => {
+      if (ctx.loadToken !== token || state !== ctx) return;
+      syncOutlineState();
+      refreshOutlineUi();
+    }).catch(() => {});
+  }
+
   docDeps.onActivate?.(ctx);
+}
+
+/**
+ * 侧栏两个面板（目录 / 缩略图）是按「当前 state」渲染的，切标签时必须重画。
+ *
+ * 之前只在 ensureDocShells() 里画一次：新建的标签有内容，但**切回旧标签**时
+ * 目录面板还留着上一个文档的列表，而 loadOutline() 又要等异步解析完才覆盖 ——
+ * 用户看到的就是「多文件后目录索引不见/是别的文档的」。
+ */
+function restoreDocPanes() {
+  if (!state.pdf) return;
+  buildOutline();
+  markOutlineActive(state.current);
+  buildThumbnails();
+  observeThumbs();
+}
+
+/** 目录面板按当前 state 重新渲染（解析完成/切换文档后都要来一次）。 */
+function refreshOutlineUi() {
+  buildOutline();
+  markOutlineActive(state.current);
 }
 
 /** 把 state 里的元信息刷到工具栏（切标签 / 换文档后都要调）。 */
@@ -285,6 +336,7 @@ function releaseDocument(ctx) {
   try { if (ctx.objectUrl) URL.revokeObjectURL(ctx.objectUrl); } catch { /* 忽略 */ }
   ctx.pdf = null;
   ctx.objectUrl = null;
+  ctx.pdfBlob = null;   // 关标签后别再抱着几十 MB 的 PDF
   ctx.pages = [];
   ctx.pagesEl.textContent = '';
   ctx.pagesEl.remove();
@@ -341,7 +393,7 @@ async function resolveDocBlob(source, ctx) {
 
 function loadSettings() {
   const fallback = {
-    theme: 'auto', fit: 'width', scale: 1, invert: false, sidebar: true, tab: 'outline',
+    theme: 'auto', fit: 'width', scale: 1, invert: false, sidebar: true, tab: 'outline', autoSelfHeal: true,
   };
   try {
     return { ...fallback, ...JSON.parse(localStorage.getItem('cajviewer.settings') || '{}') };
@@ -353,6 +405,7 @@ function loadSettings() {
 function saveSettings() {
   try {
     localStorage.setItem('cajviewer.settings', JSON.stringify({
+      ...JSON.parse(localStorage.getItem('cajviewer.settings') || '{}'),
       theme: state.theme,
       fit: state.fit,
       scale: state.customScale,
@@ -424,8 +477,8 @@ function formatBytes(n) {
 }
 
 function suggestPdfName(name) {
-  const base = String(name || '').replace(/\.[^.\\/]+$/, '') || 'document';
-  return `${base}.pdf`;
+  const sanitized = sanitizePdfName(name);
+  return sanitized || 'document.pdf';
 }
 
 /* ─────────────────────────  打开文件  ───────────────────────── */
@@ -604,7 +657,7 @@ async function openFileInto(ctx, file) {
     if (await isPdfFile(file)) {
       // 大量 .caj 其实是内嵌 PDF（或干脆就是 PDF）。直接渲染，零拷贝、零等待。
       blob = file;
-      format = 'pdf';
+      format = formatLabel(file, 'pdf');
     } else {
       showProgress('正在转换…', `${name} · ${formatBytes(file.size)}`);
       setIndeterminate(true);
@@ -633,7 +686,7 @@ async function openFileInto(ctx, file) {
       });
       if (stale()) return;
 
-      format = report.format;
+      format = formatLabel(file, report.format);
       blob = new Blob(chunks, { type: 'application/pdf' });
       setProgress(1);
       setProgressText(`转换完成：${report.pagesConverted} 页 · ${formatBytes(totalBytes)}`);
@@ -663,6 +716,8 @@ async function openFileInto(ctx, file) {
     if (report?.outlineOmitted) {
       toast('本文档的目录结构尚未验证，已省略书签', '', 5000);
     }
+    // 打开后静默自检一次：修复「文本层没建好 / 缩放变量坏掉」这类可确证问题
+    if (!stale()) scheduleSelfHeal();
   } catch (err) {
     hideProgress();
     // 这是「已经告知用户」的可预期失败，用 warn 记录即可，不必污染控制台错误流
@@ -679,10 +734,40 @@ async function openFileInto(ctx, file) {
   }
 }
 
+/**
+ * 展示用的格式名。
+ *
+ * 转换引擎返回的 report.format 是它**探测到的内部格式**，不一定等于用户拿到的那个文件：
+ * CAJ 有很多变体（早期 CAJ / KDH 容器 / 内嵌 PDF 的 CAJ），同一个 .caj 文件被探成
+ * `kdh` 是正常的，但界面上把 CAJ 显示成 KDH 会让人以为转换错了。
+ * 所以：用户文件名带了已知扩展名时以文件名为准，否则退回探测结果。
+ */
+const KNOWN_FILE_FORMATS = new Set(['caj', 'kdh', 'hn', 'nh', 'c8', 'teb', 'caa', 'pdf']);
+
+function formatLabel(source, detected = '') {
+  const name = String((source && source.name) || source || '');
+  const ext = name.includes('.') ? name.slice(name.lastIndexOf('.') + 1).toLowerCase() : '';
+  // 徽章要说「用户拿到的是什么格式」，所以文件名优先于引擎探测结果
+  // （.caj 被引擎探测成 kdh 时，用户看到的仍应是 CAJ）。
+  if (KNOWN_FILE_FORMATS.has(ext)) return { label: ext, title: `文件扩展名 .${ext}` };
+  const det = String(detected || '').toLowerCase();
+  // 探测值只在已知格式时才信；未知值（引擎将来新增的格式名）不能直接往外显，
+  // 否则用户会看到 ZZZ 这种内部字符串。此时界面里的确实就是 PDF。
+  if (KNOWN_FILE_FORMATS.has(det)) return { label: det, title: `由转换引擎识别为 ${det.toUpperCase()}` };
+  // 既没有扩展名、引擎也没给出已知格式：能显示出来就说明它能按 PDF 渲染，
+  // 但要在 title 里说明推断依据，别让它看起来像「文件本来就是 PDF」。
+  return {
+    label: 'pdf',
+    title: detected ? `无法识别的格式（引擎返回 ${det}），按 PDF 渲染` : '无扩展名，按 PDF 渲染',
+  };
+}
+
 function setFormatBadge(format) {
-  const fmt = String(format || 'pdf').toLowerCase();
+  const info = format && typeof format === 'object' ? format : { label: format };
+  const fmt = String(info.label || 'pdf').toLowerCase();
   el.formatBadge.textContent = fmt.toUpperCase();
   el.formatBadge.dataset.fmt = fmt;
+  el.formatBadge.title = String(info.title || `文件扩展名 .${fmt}`);
   el.formatBadge.hidden = false;
 }
 
@@ -693,6 +778,9 @@ async function mountPdf(blob, token, ctx = state) {
   // 后台标签只做「取 pdf + 记下第 1 页尺寸」，DOM 等 activateDocument() 再补。
   if (ctx.objectUrl) URL.revokeObjectURL(ctx.objectUrl);
   ctx.objectUrl = URL.createObjectURL(blob);
+  // 保存 PDF 要用原始 blob：objectUrl 只够 <a download> 用，而 iOS 上更可靠的路子
+  // 是 Web Share（需要 File 对象）；顺便也留住了「这个文档到底多大」。
+  ctx.pdfBlob = blob;
 
   const pdf = await pdfjsLib.getDocument({
     url: ctx.objectUrl,
@@ -744,16 +832,17 @@ function ensureDocShells() {
   if (!el.pageInput.value) el.pageInput.value = '1';
   buildPageShells();
   state.needsShells = false;
-  state.outline = [];
+  if (!Array.isArray(state.outline)) state.outline = [];
   buildOutline();
   buildThumbnails();
   // 目录解析比较慢，放到首屏之后再处理，避免拖慢打开速度。
   const token = state.loadToken;
-  loadOutline().then(() => {
-    if (token !== state.loadToken) return;
-    buildOutline();
-    markOutlineActive(state.current);
-  }).catch(() => {});
+  const pdf = state.pdf;
+  loadOutline(pdf).then(() => {
+    if (token !== state.loadToken || state.pdf !== pdf) return;
+    syncOutlineState();
+    refreshOutlineUi();
+  }).catch(() => { if (token === state.loadToken && state.pdf === pdf) refreshOutlineUi(); });
 }
 
 function buildPageShells() {
@@ -770,7 +859,7 @@ function buildPageShells() {
       num, div, pdfPage: null, pagePromise: null,
       canvas: null, ctx: null, textLayerDiv: null, textLayer: null,
       renderTask: null, viewport: null, scale: 0, rotation: null,
-      rendered: false, renderToken: 0,
+      rendered: false, renderToken: 0, renderStarted: false,
       textItems: null, textItemsPromise: null,
       thumbEl: null, thumbCanvas: null, thumbDone: false,
     });
@@ -939,6 +1028,9 @@ async function renderPage(p) {
   if (p.renderTask) return;
 
   const waitToken = ++p.renderToken;
+  // 同步打标：ensurePdfPage() 是 await，自检若在这个窗口里跑，会看到
+  // rendered/renderTask/canvas 三个都还是空的，从而把「正在渲染」误报成「没画出内容」。
+  p.renderStarted = true;
 
   try { await ensurePdfPage(p); } catch { return; }
   if (waitToken !== p.renderToken || !p.pdfPage) return;
@@ -980,7 +1072,15 @@ async function renderPage(p) {
   try {
     await task.promise;
   } catch (err) {
-    if (err?.name !== 'RenderingCancelledException') console.warn('页面渲染失败', p.num, err);
+    if (err?.name !== 'RenderingCancelledException') {
+      console.warn('页面渲染失败', p.num, err);
+      // 失败要留下可被自检发现的痕迹：清掉半成品画布并撤回 renderStarted，
+      // 否则这一页会一直是「有个空白 canvas」的假成功状态。
+      p.canvas = null;
+      p.ctx = null;
+      p.renderStarted = false;
+      spinner.remove();
+    }
     return;
   } finally {
     if (p.renderTask === task) p.renderTask = null;
@@ -989,13 +1089,34 @@ async function renderPage(p) {
   if (myToken !== p.renderToken) return;
   spinner.remove();
   p.rendered = true;
-  renderTextLayer(p, myToken).catch(() => {});
+  // 文本层是异步补上的：把 promise 记到 p 上，自检才分得清「还没建完」和
+  // 「建完但确实是空的」，否则用户刚打开文件点自检必然误报 text-layer-empty。
+  trackTextLayer(p, myToken);
+}
+
+/** 启动文本层并记录「在途」状态（自检与一键修复都要靠它判断时序）。 */
+function trackTextLayer(p, myToken, timeoutMs = 15000) {
+  const promise = renderTextLayer(p, myToken).catch(() => {});
+  p.textLayerPending = promise;
+  // 兜底：文本层万一永不 settle（worker 卡死 / 页面被 cleanup），该页会被自检
+  // 永久排除在检查之外（假阴性），这里到点强制解除「在途」标记。
+  const timer = setTimeout(() => {
+    if (p.textLayerPending === promise) p.textLayerPending = null;
+  }, timeoutMs);
+  promise.then(() => {
+    clearTimeout(timer);
+    if (p.textLayerPending === promise) p.textLayerPending = null;
+  });
+  return promise;
 }
 
 /** 文本层：支持选中、复制与查找高亮。 */
 async function renderTextLayer(p, myToken) {
   try {
-    if (!p.textLayerDiv) {
+    // releasePage() 会把 p.div 清空（textLayerDiv 因此脱离 DOM），重建时必须造新的，
+    // 否则后续 append 会挂到一个永远不在文档里的孤儿子树上 —— 表现就是「文字看得见但
+    // 选不中、高亮不显示」。这个坑在文本层缩放修好之后才暴露出来。
+    if (!p.textLayerDiv || !p.textLayerDiv.isConnected || p.textLayerDiv.parentElement !== p.div) {
       p.textLayerDiv = document.createElement('div');
       p.textLayerDiv.className = 'textLayer';
       p.div.append(p.textLayerDiv);
@@ -1028,6 +1149,7 @@ function releasePage(p) {
   p.canvas = null;
   p.ctx = null;
   p.textLayerDiv = null;
+  p.textLayerPending = null;
   p.rendered = false;
 }
 
@@ -1041,6 +1163,13 @@ function renderBand() {
 }
 
 function pagesInBand() {
+  // 单页模式下非当前页是 display:none，offsetTop/offsetHeight 全是 0 —— 会被
+  // 误判成「恒在带内」。空白页检测与一键修复都靠这个函数，漏了这条会把整篇
+  // 文档当成「视口内」重建（24/60 页一起重画）。
+  if (el.viewer.classList.contains('single-page')) {
+    const p = state.pages[state.current - 1];
+    return p ? [p] : [];
+  }
   const band = renderBand();
   const out = [];
   for (const p of state.pages) {
@@ -1329,6 +1458,8 @@ const appFacade = {
   },
   toast,
   runSelfCheck,
+  repairRuntime,
+  detectRuntimeIssues,
   warmOfflineCache,
   scrollToPage,
   setFit,
@@ -1483,20 +1614,25 @@ function markOutlineActive(pageNum) {
   best?.scrollIntoView({ block: 'nearest' });
 }
 
-/** 把 pdf.js 的目录树解析成带页码的结构。 */
-async function loadOutline() {
+/** 把 pdf.js 的目录树解析成带页码的结构。
+ *
+ *  `state` 是「当前活动文档」的共享槽位，而解析要 await 多次 —— 中途用户切换标签时，
+ * 写 state.outline 会把 A 的目录落到 B 头上（A 有目录 / B 无目录时最明显：B 的目录
+ * 面板凭空出现别人的书签）。所以全程用参数里的 pdf，写回前再确认文档没被换掉。
+ */
+async function loadOutline(pdf = state.pdf) {
+  if (!pdf) return;
   let raw = [];
-  try { raw = (await state.pdf.getOutline()) || []; } catch { raw = []; }
-  if (!raw.length) return;
+  try { raw = (await pdf.getOutline()) || []; } catch { raw = []; }
 
   const walk = async (items) => {
     const out = [];
     for (const it of items) {
       let page = null;
       try {
-        const dest = typeof it.dest === 'string' ? await state.pdf.getDestination(it.dest) : it.dest;
+        const dest = typeof it.dest === 'string' ? await pdf.getDestination(it.dest) : it.dest;
         if (Array.isArray(dest) && dest[0] != null) {
-          page = (await state.pdf.getPageIndex(dest[0])) + 1;
+          page = (await pdf.getPageIndex(dest[0])) + 1;
         }
       } catch { /* 目标无效则保留无页码 */ }
       out.push({
@@ -1508,7 +1644,37 @@ async function loadOutline() {
     return out;
   };
 
-  state.outline = await walk(raw);
+  // 没有目录也要清干净：多标签下 state.outline 属于上一个文档，
+  // 留着会让新文档的目录面板显示别人的书签。
+  const outline = raw.length ? await walk(raw) : [];
+  // 目录按文档缓存：state 是共享槽位，A 的解析若在 B 活动期间完成，
+  // 直接写 state.outline 会污染 B。写回它自己的 ctx，只有它仍是当前文档时
+  // 才同步到 state —— 这样「切走再切回」也不会丢掉目录。
+  const own = ctxOf(pdf);
+  if (own) own.outline = outline;
+  if (state.pdf === pdf) state.outline = outline;
+}
+
+/** 当前 state 是不是某个 pdf / ctx（用于把解析结果写回正确的文档）。 */
+function ctxOf(pdf) {
+  try {
+    // 必须走 docs.contextOf：docs.list() 是对外的精简视图，不含 ctx 字段，
+    // 用它反查会永远返回 null —— 目录结果就再也写不回自己那份文档（切走再切回永远空）。
+    if (typeof app.docs?.contextOf === 'function') return app.docs.contextOf(pdf);
+    const docs = app.docs?.list?.() || [];
+    const hit = docs.find((d) => d.ctx && d.ctx.pdf === pdf);
+    return hit ? hit.ctx : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 把当前活动文档的目录缓存搬进共享槽位 state.outline。 */
+function syncOutlineState() {
+  if (!state.pdf) { state.outline = []; return; }
+  if (Array.isArray(activeDoc?.outline)) { state.outline = activeDoc.outline; return; }
+  if (Array.isArray(state.outline)) return;
+  state.outline = [];
 }
 
 /* ─────────────────────────  侧栏：缩略图  ───────────────────────── */
@@ -1703,9 +1869,31 @@ function pageTextItems(p) {
     p.textItemsPromise = state.pdf.getPage(p.num)
       .then((pg) => pg.getTextContent())
       .then((tc) => { p.textItems = tc.items.filter((it) => typeof it.str === 'string'); return p.textItems; })
-      .catch(() => { p.textItems = []; return p.textItems; });
+      .catch(() => {
+        // 失败绝不能落缓存：`[]` 是真值，一旦缓存，这一页整个会话都会被当成
+        // 「本来就没文字」，一次瞬时失败（worker 忙 / 页面被 cleanup）就会让
+        // 自检永久漏报该页真的丢了文本层。清掉 promise 让下次重试。
+        if (p.textItemsPromise) p.textItemsPromise = null;
+        return [];
+      });
   }
   return p.textItemsPromise;
+}
+
+/** 限并发 map：自检要对每页发 getTextContent（worker 往返），顺序 await 会在
+ *  扫描件（页页有内容判定）上卡住数秒，全并发又会把 worker 打爆。 */
+async function mapLimit(items, limit, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, async () => {
+    for (;;) {
+      const i = next++;
+      if (i >= items.length) return;
+      out[i] = await fn(items[i], i);
+    }
+  });
+  await Promise.all(workers);
+  return out;
 }
 
 function clearHighlights(p) {
@@ -1779,15 +1967,232 @@ function stepHit(delta, silent = false) {
 
 /* ─────────────────────────  保存 PDF  ───────────────────────── */
 
-el.btnDownload.addEventListener('click', () => {
-  if (!state.objectUrl) return;
+/**
+ * 保存 PDF。
+ *
+ * 用户的原话是「增加 pdf 下载优化，显示下载地址」—— 这里的核心不是把文件塞给
+ * 浏览器了事，而是把三件用户看不见的事摊开：
+ *   1. 存成什么名字（可以在面板里改，不再只能接受自动拼出来的名字）；
+ *   2. 有多大、有几页（点保存之前心里有数）；
+ *   3. 走哪条保存通道 —— iOS 的 <a download> 基本不可靠（点完可能只是原地打开 PDF，
+ *      把正在看的文档顶掉），系统分享面板「存储到文件」才是 iPad 上的正路；
+ *      桌面 Chromium 则优先用原生保存对话框（能选目录、能看进度）。
+ * 顺带把 blob: 地址显式给出来：它在当前会话里可以直接打开 / 复制，也是排查
+ * 「到底下载到了什么」时最直接的证据。
+ */
+const exportSheet = { open: false, busy: false, mode: 'anchor' };
+
+const isAppleMobile = /iPad|iPhone|iPod/.test(navigator.userAgent)
+  || (navigator.platform === 'MacIntel' && (navigator.maxTouchPoints || 0) > 1);
+
+function canShareFile() {
+  return typeof navigator.canShare === 'function' && typeof navigator.share === 'function';
+}
+
+function canUseSavePicker() {
+  return typeof window.showSaveFilePicker === 'function' && !isAppleMobile;
+}
+
+/** 文件名净化：去掉路径分隔符与非法字符，压掉空白，统一换成 .pdf 扩展名。 */
+function sanitizePdfName(name) {
+  let base = String(name || '').trim().replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_');
+  base = base.replace(/\s+/g, ' ');
+  // 先把源文件扩展名摘掉（.caj / .kdh / …），最后统一补 .pdf；
+  // 否则会拼出 `笔记 v2.caj.pdf` 这种双扩展名。
+  const dot = base.lastIndexOf('.');
+  if (dot > 0 && dot > base.length - 8) base = base.slice(0, dot);
+  base = base.replace(/^\.+/, '').trim();
+  if (!base) base = 'document';
+  if (base.length > 120) base = base.slice(0, 120);
+  return `${base}.pdf`;
+}
+
+async function copyText(text) {
+  if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+    try { await navigator.clipboard.writeText(text); return true; } catch { /* 兜底 */ }
+  }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.top = '-1000px';
+    ta.style.opacity = '0';
+    document.body.append(ta);
+    ta.select();
+    ta.setSelectionRange(0, ta.value.length);
+    const ok = document.execCommand('copy');
+    ta.remove();
+    return !!ok;
+  } catch {
+    return false;
+  }
+}
+
+function exportModeInfo() {
+  // 「存到哪里」是用户点保存前最想知道的事，各条通道的下落不一样，分开说清楚。
+  if (canShareFile()) {
+    return {
+      id: 'share',
+      label: '系统分享面板',
+      hint: isAppleMobile
+        ? '点「保存」后弹出分享面板，选「存储到文件」可以放进「文件」App 的下载项或 iCloud 云盘。整个转换与保存都在本机完成，文件不会上传到任何服务器。'
+        : '点「保存」后弹出系统分享面板，可选择保存位置或分享给其它 App。',
+    };
+  }
+  if (canUseSavePicker()) {
+    return {
+      id: 'picker',
+      label: '另存为对话框',
+      hint: '点「保存」后弹出系统另存为对话框，目录和文件名都可以自己选，写入过程会显示进度。',
+    };
+  }
+  return {
+    id: 'anchor',
+    label: '浏览器下载',
+    hint: isAppleMobile
+      ? '文件会下载到「文件」App 的「下载项」里。若浏览器没有反应，可展开下面的下载地址，长按复制后粘贴到新标签页打开。'
+      : '文件会下载到浏览器的默认下载目录（Chrome / Edge 可按 Ctrl+J 打开下载列表）。',
+  };
+}
+
+function openExportSheet() {
+  if (!state.objectUrl || !state.pdfBlob) return;
+  exportSheet.open = true;
+  el.exportName.value = state.downloadName || suggestPdfName(state.fileName);
+  const size = formatBytes(state.pdfBlob.size);
+  el.exportDetail.textContent =
+    `${state.fileName || '未命名'} · ${state.numPages || 0} 页 · PDF ${size}`;
+  const mode = exportModeInfo();
+  exportSheet.mode = mode.id;
+  el.exportMode.innerHTML = '';
+  const strong = document.createElement('b');
+  strong.textContent = mode.label;
+  el.exportMode.append('保存方式：', strong);
+  el.exportLink.textContent = state.objectUrl;
+  el.exportLinkHint.textContent = isAppleMobile
+    ? '这是本次会话内的临时地址（blob:），只能在这个页面打开；关掉页面后失效。'
+    : '这是本次会话内的临时地址（blob:）：复制到同一个浏览器的新标签页可以直接打开，关掉页面后失效。';
+  el.exportLinkBox.open = false;
+  setExportHint(mode.hint);
+  el.exportOverlay.hidden = false;
+  el.exportName.focus();
+  el.exportName.select?.();
+}
+
+function closeExportSheet() {
+  exportSheet.open = false;
+  el.exportOverlay.hidden = true;
+}
+
+function setExportHint(text, isError = false) {
+  el.exportHint.textContent = text || '';
+  el.exportHint.classList.toggle('is-err', !!isError);
+}
+
+/** 从面板里拿到用户确认过的文件名（净化后），并写回 state。 */
+function exportNameFromSheet() {
+  const name = sanitizePdfName(el.exportName.value || state.downloadName);
+  el.exportName.value = name;
+  state.downloadName = name;
+  return name;
+}
+
+/** 兜底通道：<a download>。download 属性在 iOS 上会被忽略，所以只当最后选择。 */
+function downloadViaAnchor(name) {
   const a = document.createElement('a');
   a.href = state.objectUrl;
-  a.download = state.downloadName;
+  a.download = name;
+  a.rel = 'noopener';
   document.body.append(a);
   a.click();
   a.remove();
-  toast(`已导出 ${state.downloadName}`, 'ok');
+}
+
+async function saveExport() {
+  if (exportSheet.busy) return;
+  const name = exportNameFromSheet();
+  const blob = state.pdfBlob;
+  if (!blob) { setExportHint('当前文档还没有可保存的 PDF 数据。', true); return; }
+
+  exportSheet.busy = true;
+  el.btnExportSave.disabled = true;
+  try {
+    // 1) 移动端（iPad）：Web Share 的「存储到文件」是唯一稳定的落盘通道。
+    if (exportSheet.mode === 'share') {
+      const file = new File([blob], name, { type: 'application/pdf' });
+      if (navigator.canShare({ files: [file] })) {
+        try {
+          await navigator.share({ files: [file], title: name });
+          closeExportSheet();
+          toast(`已导出 ${name}`, 'ok');
+          return;
+        } catch (err) {
+          // 用户主动取消不算失败，别弹红字吓人。
+          if (err && (err.name === 'AbortError' || err.name === 'NotAllowedError')) {
+            setExportHint('已取消。可以再点一次「保存」，或用下面的下载地址。');
+            return;
+          }
+          setExportHint(`分享面板打不开（${err && err.name}），已改用浏览器下载。`, true);
+        }
+      } else {
+        setExportHint('这个浏览器不支持把 PDF 交给分享面板，已改用浏览器下载。', true);
+      }
+      exportSheet.mode = 'anchor';
+      downloadViaAnchor(name);
+      closeExportSheet();
+      toast(`已开始下载 ${name}`, 'ok');
+      return;
+    }
+
+    // 2) 桌面 Chromium：原生另存为对话框（可选目录、能看到进度）。
+    if (exportSheet.mode === 'picker') {
+      try {
+        const handle = await window.showSaveFilePicker({
+          suggestedName: name,
+          types: [{ description: 'PDF 文档', accept: { 'application/pdf': ['.pdf'] } }],
+        });
+        const writable = await handle.createWritable();
+        await writable.write(blob);
+        await writable.close();
+        closeExportSheet();
+        toast(`已保存 ${name}`, 'ok');
+        return;
+      } catch (err) {
+        if (err && err.name === 'AbortError') {
+          setExportHint('已取消。');
+          return;
+        }
+        setExportHint(`另存为对话框打不开（${err && err.name}），已改用浏览器下载。`, true);
+        exportSheet.mode = 'anchor';
+      }
+    }
+
+    // 3) 兜底：浏览器下载。
+    downloadViaAnchor(name);
+    closeExportSheet();
+    toast(`已开始下载 ${name}，可在浏览器下载列表中查看`, 'ok');
+  } catch (err) {
+    setExportHint(`保存失败：${(err && err.message) || err}`, true);
+  } finally {
+    exportSheet.busy = false;
+    el.btnExportSave.disabled = false;
+  }
+}
+
+el.btnDownload.addEventListener('click', openExportSheet);
+el.btnExportCancel.addEventListener('click', closeExportSheet);
+el.btnExportSave.addEventListener('click', () => { saveExport(); });
+el.btnExportCopy.addEventListener('click', async () => {
+  if (!state.objectUrl) return;
+  const ok = await copyText(state.objectUrl);
+  setExportHint(ok ? '下载地址已复制，可粘贴到新标签页直接打开。' : '复制失败，请长按下面的地址手动复制。', !ok);
+});
+el.exportName.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); saveExport(); }
+});
+el.exportOverlay.addEventListener('click', (e) => {
+  if (e.target === el.exportOverlay) closeExportSheet();
 });
 
 /* ─────────────────────────  打开文件入口  ───────────────────────── */
@@ -1849,6 +2254,7 @@ addEventListener('keydown', (e) => {
   if (mod && e.key.toLowerCase() === 's') { e.preventDefault(); if (state.objectUrl) el.btnDownload.click(); return; }
 
   if (e.key === 'Escape') {
+    if (exportSheet.open) return closeExportSheet();
     if (!el.searchBar.hidden) return closeSearch();
     if (!el.progressOverlay.hidden) return el.btnCancel.click();
     if (!el.sidebar.hidden && state.pdf) return toggleSidebar(false);
@@ -1951,6 +2357,8 @@ async function boot() {
   state.customScale = Number(settings.scale) > 0 ? Number(settings.scale) : 1;
   state.invert = !!settings.invert;
   el.viewer.classList.toggle('invert-pages', state.invert);
+  // 自动自修复默认开启，用户可在「设置 → 诊断」里关掉
+  selfHeal.off = settings.autoSelfHeal === false;
 
   if (settings.sidebar && innerWidth >= 900) el.sidebar.hidden = false;
   if (settings.tab === 'thumbs') document.querySelector('.tab[data-tab="thumbs"]')?.click();
@@ -2081,6 +2489,252 @@ async function warmOfflineCache({ timeoutMs = 900000 } = {}) {
   return result;
 }
 
+/* ─────────────────────────  自修复  ───────────────────────── */
+
+/**
+ * 找出当前文档里「本该正常但确实坏了」的地方。
+ *
+ * 这些都是可以在不重新打开文件的前提下就地修好的：文本层没建/是空的/缩放到
+ * 非法值、当前页在视口里却没渲染、目录面板和 state.outline 对不上、缩略图
+ * 尺寸为 0、只有 1 页却开着单页模式等。
+ */
+async function detectRuntimeIssues() {
+  const issues = [];
+
+  if (!state.pdf) {
+    issues.push({ code: 'no-document', label: '当前没有打开文档', auto: false });
+    return issues;
+  }
+
+  const rendered = state.pages.filter((p) => p.rendered && !p.renderTask && !p.textLayerPending);
+
+  // 「这一页缺文本层」必须结合「这一页到底有没有文字」判断：
+  // pdf.js 只为带 str 的项建 span，扫描页 / 纯图页 / 被转换器替换掉的空白页
+  // 在 DOM 上与「文本层坏掉」完全同形。只看 span 会让正常文档永远报红字。
+  let hasTextNoLayer = 0;
+  let withText = 0;
+  let withLayer = 0;
+  await mapLimit(rendered, 4, async (p) => {
+    const layer = p.textLayerDiv;
+    if (layer && layer.isConnected && layer.querySelector('span')) {
+      withLayer += 1;
+      withText += 1;
+      return;
+    }
+    const items = await pageTextItems(p);
+    if (!items.some((it) => typeof it.str === 'string' && it.str.length > 0)) return;
+    withText += 1;
+    hasTextNoLayer += 1;
+  });
+  if (hasTextNoLayer) {
+    issues.push({
+      code: hasTextNoLayer === withText && withLayer === 0 ? 'text-layer-empty' : 'text-layer-partial',
+      count: hasTextNoLayer,
+      label: `${hasTextNoLayer} 页有文字却没有文本层（文字会叠在一起、查找会失效）`,
+      auto: true,
+    });
+  }
+
+  for (const p of rendered) {
+    const layer = p.textLayerDiv;
+    if (!layer || !layer.isConnected) continue;
+    const span = layer.querySelector('span');
+    if (!span) continue;
+    const cs = getComputedStyle(span);
+    const fs = parseFloat(cs.fontSize) || 0;
+    const fh = parseFloat(cs.getPropertyValue('--font-height')) || 0;
+    const factor = textLayerScaleFactor(p) || 1;
+    // pdf.js 的 span 字号是 `calc(--font-height * --total-scale-factor)`：
+    // 期望值必须把缩放因子算进去，否则高倍缩放下会误报（--font-height 是无单位数字）。
+    const expect = fh * factor;
+    if (fh > 0 && fs > 0 && Math.abs(fs - expect) > Math.max(1, expect * 0.15)) {
+      issues.push({
+        code: 'text-scale-broken',
+        count: 1,
+        label: `文本层字号 ${fs.toFixed(1)}px 与页面比例 ${expect.toFixed(1)}px 不一致（文字会错位/重叠）`,
+        auto: true,
+      });
+      break;
+    }
+  }
+
+  const inBand = pagesInBand();
+  const blank = inBand.filter((p) => !p.rendered && !p.renderTask && !p.canvas && !p.renderStarted);
+  if (blank.length) {
+    issues.push({ code: 'blank-pages', count: blank.length, label: `视口内还有 ${blank.length} 页没画出内容`, auto: true });
+  }
+
+  const outlineCount = el.paneOutline.querySelectorAll('.olink').length;
+  if ((state.outline?.length || 0) > 0 && outlineCount === 0) {
+    issues.push({ code: 'outline-stale', count: 1, label: '文档有目录但侧栏是空的', auto: true });
+  } else if ((state.outline?.length || 0) === 0 && !el.paneOutline.querySelector('.pane-empty')) {
+    issues.push({ code: 'outline-stale', count: 1, label: '侧栏目录与当前文档不一致', auto: true });
+  }
+
+  return issues;
+}
+
+/** 等所有在途的渲染/文本层结束（有上限，慢设备上也不会一直等）。 */
+async function settleRendering({ timeoutMs = 5000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const busy = state.pages.some((p) => p.renderTask || p.textLayerPending);
+    if (!busy || Date.now() > deadline) return;
+    await new Promise((r) => setTimeout(r, 80));
+  }
+}
+
+/** 问题指纹：code 相同但数量不同也算「还没修好」。 */
+function issueFingerprint(issue) {
+  return `${issue.code}:${issue.count || 1}`;
+}
+
+/**
+ * 读出某个页面真正生效的文本层缩放因子。
+ *
+ * 注意 `getComputedStyle().getPropertyValue('--total-scale-factor')` 在
+ * Chrome/Firefox 上返回的可能是没展开的 `calc(1.88 * 1)`，直接 parse 会得到 NaN，
+ * 所以优先用页面自己的 `--scale-factor`（纯数字），并解析 calc 表达式兜底。
+ */
+function textLayerScaleFactor(p) {
+  const style = p?.div?.style;
+  const unit = parseFloat(style?.getPropertyValue?.('--user-unit')) || 1;
+  const raw = style?.getPropertyValue?.('--scale-factor');
+  const direct = parseFloat(raw);
+  if (Number.isFinite(direct) && direct > 0) return direct * unit;
+  const total = getComputedStyle(p.div).getPropertyValue('--total-scale-factor');
+  const parsed = parseFloat(total);
+  if (Number.isFinite(parsed) && parsed > 0) return parsed * unit;
+  const m = /calc\(\s*([\d.]+)/.exec(String(total));
+  return (m ? parseFloat(m[1]) : 1) * unit;
+}
+
+/**
+ * 一键修复：不重新打开文件、不丢标签，只重建可以重建的部分。
+ *
+ * 修复顺序有讲究：先把文本层的 span 结构清掉重建（releasePage 会清空整页 DOM，
+ * 渲染管线自己会补回文本层），再修布局，最后恢复目录面板。
+ */
+async function repairRuntime({ reason = '手动', silent = false } = {}) {
+  const before = await detectRuntimeIssues();
+  const fixable = before.filter((i) => i.auto);
+  const fixed = [];
+  // silent = 自动自修复：不动用户界面（不弹「没发现问题」这种噪音提示）
+  const say = (msg, kind, ms) => { if (!silent && msg) toast(msg, kind, ms); };
+
+  if (!state.pdf) {
+    say(`还没有打开文档，先打开一个 CAJ / PDF 再试（${reason}）`, '', 5000);
+    refreshSettingsUi();
+    return { fixed, remaining: before };
+  }
+
+  // 健康文档上直接返回：不清 DOM、不重建。否则用户点一下按钮，可见页会闪一
+  // 下空白再重画，最后却被告知「没有发现问题」——纯粹的体验退化。
+  if (!fixable.length) {
+    say(`没有发现需要修复的问题（${reason}）`, 'ok', 5000);
+    refreshSettingsUi();
+    return { fixed, remaining: before };
+  }
+
+  // 0) 先等在途的渲染落定，否则「修复」会被当成又一次布局抖动
+  await settleRendering({ timeoutMs: 3000 });
+
+  // 1) 清掉可能被人为写坏的内联缩放变量：样式表里的值才是权威，
+  //    否则修完 detectRuntimeIssues() 还会报同样的异常（自愈不成立）。
+  for (const p of state.pages) {
+    for (const name of ['--total-scale-factor', '--scale-factor', '--user-unit', '--scale-round-x', '--scale-round-y']) {
+      if (p.div.style.getPropertyValue(name)) p.div.style.removeProperty(name);
+    }
+  }
+
+  // 2) 把视口内的页整页重建（文本层、canvas、缩放变量都会跟着重建）
+  for (const p of pagesInBand()) releasePage(p);
+  for (const p of state.pages) { p.thumbDone = false; }
+
+  // 3) 布局重算：把 --scale-factor / 页面盒子重新写一遍
+  applyLayout({ preserveAnchor: true });
+
+  // 4) 重新渲染视口内的页（renderVisiblePages 是同步函数，await 没有意义）
+  renderVisiblePages();
+  await settleRendering();
+
+  // 5) 目录面板按当前 state 重画
+  refreshOutlineUi();
+
+  // 6) 缩略图里尺寸为 0 的重画
+  invalidateThumbnails();
+
+  const after = await detectRuntimeIssues();
+  const afterCodes = new Set(after.map(issueFingerprint));
+  for (const b of before) {
+    if (b.auto && !afterCodes.has(issueFingerprint(b))) fixed.push(b.label);
+  }
+  const left = after.filter((a) => a.auto);
+
+  if (fixed.length) {
+    say(`已修复 ${fixed.length} 项：${fixed[0]}${fixed.length > 1 ? ' 等' : ''}`, 'ok', 7000);
+  } else {
+    say(`修复后仍有 ${left.length} 项异常，请把自检结果发出来`, 'error', 9000);
+  }
+  refreshSettingsUi();
+  return { fixed, remaining: after };
+}
+
+/* ─────────────────────  自动自修复（用户要求：不用自己点）  ───────────────────── */
+
+const selfHeal = {
+  busy: false,
+  lastAt: 0,
+  cooldownMs: 20000,   // 两次自动修复之间的最短间隔，避免在慢设备上反复抖动
+  off: false,          // 设置面板里可以关掉
+};
+
+/**
+ * 打开文档后静默检查一次：只修「代码能确证」的问题（文本层缺失/缩放变量坏掉），
+ * 修不了就不吭声 —— 自动流程绝不能弹一堆提示吓人。
+ */
+async function selfHealNow(reason = '自动', { force = false } = {}) {
+  if (selfHeal.off && !force) return null;
+  if (selfHeal.busy) return null;
+  if (!force && Date.now() - selfHeal.lastAt < selfHeal.cooldownMs) return null;
+  if (!state.pdf) return null;
+  const pdfAtStart = state.pdf;
+  selfHeal.busy = true;
+  selfHeal.lastAt = Date.now();
+  try {
+    const res = await repairRuntime({ reason, silent: true });
+    // 自动修复期间用户切了文档就别再提示了（结果已作废）
+    if (res?.fixed?.length && state.pdf === pdfAtStart) {
+      toast(`已自动修复 ${res.fixed.length} 项显示异常`, 'ok', 6000);
+    }
+    return res;
+  } catch (err) {
+    console.warn('自动修复失败', err);
+    return null;
+  } finally {
+    selfHeal.busy = false;
+  }
+}
+
+/** 等首屏渲染落定后再自修复，避免和正在跑的渲染抢资源。 */
+function scheduleSelfHeal(delayMs = 1200) {
+  if (selfHeal.off) return;
+  setTimeout(() => { selfHealNow().catch(() => {}); }, delayMs);
+}
+
+/** 设置面板的开关（默认开）。 */
+function setAutoSelfHeal(on) {
+  selfHeal.off = !on;
+  try {
+    const cur = JSON.parse(localStorage.getItem('cajviewer.settings') || '{}') || {};
+    cur.autoSelfHeal = !!on;
+    localStorage.setItem('cajviewer.settings', JSON.stringify(cur));
+  } catch { /* 隐私模式忽略 */ }
+  if (on) scheduleSelfHeal(600);
+  refreshSettingsUi();
+  return !!on;
+}
+
 /* ─────────────────────────  环境自检  ───────────────────────── */
 
 /**
@@ -2178,7 +2832,19 @@ async function runSelfCheck() {
     add('离线缓存', '不适用（局域网 http 下不注册 Service Worker）', false);
   }
 
-  // 8. 浏览器能力
+  // 8. 当前文档的运行时状态（文本层、渲染、目录面板）
+  const runtimeIssues = await detectRuntimeIssues();
+  const fixable = runtimeIssues.filter((i) => i.auto);
+  if (!state.pdf) {
+    add('当前文档', '未打开（运行时检查已跳过）', false);
+  } else if (runtimeIssues.length) {
+    add('当前文档运行时', `${runtimeIssues.length} 项异常`, true);
+    for (const i of runtimeIssues) add(`· ${i.label}`, i.auto ? '可一键修复' : '需重新打开文件', true);
+  } else {
+    add('当前文档运行时', `正常（${state.numPages} 页 / 已渲染 ${state.pages.filter((p) => p.rendered).length} 页）`, false);
+  }
+
+  // 9. 浏览器能力
   add('用户代理', navigator.userAgent);
 
   const problems = rows.filter((r) => r[2]);
@@ -2192,26 +2858,43 @@ async function runSelfCheck() {
         '所有前提都满足，问题可能出在具体文件上。试着换一个 CAJ 再打开。',
         '若打开文件时弹出中文错误提示，提示内容本身就是原因。',
       ];
+  if (fixable.length) {
+    tips.unshift('有一键可修复的项：点「一键修复」重建文本层与布局，不用重新打开文件。');
+  }
   if (swUsable && cachedOffline > 0) {
     tips.push('离线包已就绪，已可断网使用。');
   } else if (swUsable) {
     tips.push('点下方「预热离线包」把引擎和字体缓存到本机，之后断网也能打开。');
   }
+
+  const actions = [];
+  if (fixable.length) {
+    actions.push({
+      label: '一键修复',
+      busyLabel: '修复中…',
+      onClick: () => repairRuntime({ reason: '自检发现异常' })
+        .then((r) => (r.remaining.filter((i) => i.auto).length
+          ? `仍有 ${r.remaining.filter((i) => i.auto).length} 项`
+          : `已修复 ${r.fixed.length} 项`)),
+    });
+  }
+  if (swUsable) {
+    actions.push({
+      label: '预热离线包',
+      busyLabel: '预热中…',
+      onClick: () => warmOfflineCache().then((r) => (r.ok ? '已完成' : '未完成')),
+    });
+  }
+
   show({
     title: problems.length ? `环境自检：${problems.length} 项有问题` : '环境自检：全部通过',
     rows,
     tips,
-    actions: swUsable
-      ? [{
-          label: '预热离线包',
-          busyLabel: '预热中…',
-          onClick: () => warmOfflineCache().then((r) => (r.ok ? '已完成' : '未完成')),
-        }]
-      : undefined,
+    actions: actions.length ? actions : undefined,
   });
 
   // 设置面板的「诊断」分区直接消费这个结构（rows 是 [名称, 值, 是否异常] 三元组）
-  return { rows, tips };
+  return { rows, tips, runtimeIssues };
 }
 
 el.btnSelfCheck?.addEventListener('click', () => {
@@ -2241,8 +2924,33 @@ globalThis.__caj = {
   prunePages,
   releasePage,
   runSelfCheck,
+  repairRuntime,
+  detectRuntimeIssues,
+  selfHealNow: (reason, opts) => selfHealNow(reason, opts),
+  resetSelfHealCooldown: () => { selfHeal.lastAt = 0; },
+  setAutoSelfHeal,
+  get autoSelfHeal() { return !selfHeal.off; },
+  pagesInBand,
+  setScrollMode: (mode) => appFacade.setScrollMode(mode),
+  setPageGap: (px) => appFacade.setPageGap(px),
   warmOfflineCache,
   clearRecentFiles,
+  // 保存 PDF：面板开关与状态，供 e2e 断言「文件名 / 大小 / 保存通道 / blob 地址」
+  openExportSheet,
+  closeExportSheet,
+  saveExport,
+  sanitizePdfName,
+  exportMode: () => exportSheet.mode,
+  exportPanelState: () => ({
+    open: exportSheet.open,
+    mode: exportSheet.mode,
+    name: el.exportName.value,
+    detail: el.exportDetail.textContent,
+    modeText: el.exportMode.textContent,
+    link: el.exportLink.textContent,
+    hint: el.exportHint.textContent,
+    hintIsError: el.exportHint.classList.contains('is-err'),
+  }),
 };
 
 // boot 出错也要让用户看得见 —— 否则又是一次「界面在但点不动」的静默失败

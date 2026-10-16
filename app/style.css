@@ -149,11 +149,18 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor;
 }
 .badge[data-fmt="pdf"]  { background: #fdeaea; color: #c0392b; }
 .badge[data-fmt="kdh"]  { background: #eaf6ee; color: #1e874b; }
-.badge[data-fmt="hn"], .badge[data-fmt="c8"] { background: #fdf3e3; color: #a35c00; }
+.badge[data-fmt="caj"]  { background: #e8f0fe; color: #2f6fed; }
+.badge[data-fmt="hn"], .badge[data-fmt="nh"],
+.badge[data-fmt="c8"], .badge[data-fmt="teb"],
+.badge[data-fmt="caa"] { background: #fdf3e3; color: #a35c00; }
 [data-theme="dark"] .badge[data-fmt="pdf"] { background: #3a1f1f; color: #ff9a8f; }
 [data-theme="dark"] .badge[data-fmt="kdh"] { background: #16301f; color: #6ddc9b; }
+[data-theme="dark"] .badge[data-fmt="caj"] { background: #1d2a44; color: #8fb3ff; }
 [data-theme="dark"] .badge[data-fmt="hn"],
-[data-theme="dark"] .badge[data-fmt="c8"]  { background: #35280f; color: #f0bd6a; }
+[data-theme="dark"] .badge[data-fmt="nh"],
+[data-theme="dark"] .badge[data-fmt="c8"],
+[data-theme="dark"] .badge[data-fmt="teb"],
+[data-theme="dark"] .badge[data-fmt="caa"]  { background: #35280f; color: #f0bd6a; }
 
 /* 页码 */
 .pager { display: flex; align-items: center; gap: 5px; font-size: 13px; color: var(--text-dim);
@@ -304,6 +311,17 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor;
   overflow: hidden;
   contain: layout paint;
   flex: 0 0 auto;
+
+  /* 文本层缩放变量。pdf.js 的 pdf_viewer.css 只给 `.pdfViewer .page` 设了这些默认值，
+     而本应用用的是 `#viewer` + `.page`，匹配不到 —— 结果 `--total-scale-factor`
+     变成非法值，文本层 span 的 font-size 整条失效退回浏览器默认 16px，
+     于是所有文字叠成一团、高亮位置也全错（查找看着像坏掉）。
+     这三个变量的语义与 pdf.js 官方一致，不要改。 */
+  --scale-factor: 1;
+  --user-unit: 1;
+  --total-scale-factor: calc(var(--scale-factor) * var(--user-unit));
+  --scale-round-x: 1px;
+  --scale-round-y: 1px;
 }
 .page.is-blank { background: transparent; box-shadow: none; }
 
@@ -409,6 +427,33 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor;
 .modal-percent { margin: 8px 0 0; font-size: 12px; color: var(--text-dim);
                  text-align: right; font-variant-numeric: tabular-nums; }
 .modal-actions { display: flex; justify-content: flex-end; margin-top: 16px; }
+
+/* ─────────────────────────  保存 PDF 面板  ───────────────────────── */
+.export-modal { width: min(460px, 100%); }
+.export-field { display: block; margin: 0 0 12px; }
+.export-field > span { display: block; margin-bottom: 6px; font-size: 12px; color: var(--text-dim); }
+.export-field input {
+  width: 100%; height: 36px; padding: 0 11px;
+  border: 1px solid var(--border); border-radius: 9px;
+  background: var(--surface-2); color: var(--text); font-size: 13.5px;
+}
+.export-field input:focus { outline: none; border-color: var(--accent); }
+.export-mode { margin: 0 0 10px; font-size: 12.5px; line-height: 1.55; color: var(--text-dim); }
+.export-mode b { color: var(--text); font-weight: 600; }
+.export-link { margin: 0 0 4px; font-size: 12.5px; color: var(--text-dim); }
+.export-link summary { cursor: pointer; }
+.export-link-text {
+  margin: 8px 0 4px; padding: 8px 10px; border-radius: 8px;
+  background: var(--surface-2); border: 1px solid var(--border);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px;
+  word-break: break-all; user-select: all; -webkit-user-select: all;
+}
+.export-link-hint { margin: 0; font-size: 11.5px; line-height: 1.5; }
+.export-hint {
+  margin: 12px 0 0; font-size: 12px; line-height: 1.55; color: var(--text-dim);
+  min-height: 18px;
+}
+.export-hint.is-err { color: var(--danger, #d64545); }
 
 /* Toast */
 .toast {

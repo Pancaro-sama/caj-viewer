@@ -846,9 +846,16 @@ export function createDocManager({ viewer, el, state, api } = {}) {
   bindDom();
   renderTabs();
 
+  /** 由 pdf 反查它所属的标签 ctx（异步解析结果要写回自己那份文档，而不是当前活动的）。 */
+  function contextOf(pdf) {
+    const hit = tabs.find((t) => t.ctx && t.ctx.pdf === pdf);
+    return hit ? hit.ctx : null;
+  }
+
   return {
     addFromBlob,
     list,
+    contextOf,
     switchTo,
     close,
     closeActive,

@@ -141,13 +141,13 @@ class Cdp {
   }
 
   /** 在页面里求值，返回可结构化克隆的值。 */
-  async eval(expression) {
+  async eval(expression, { timeoutMs = 120000, awaitPromise = true } = {}) {
     const r = await this.send('Runtime.evaluate', {
       expression: `(async () => { ${expression} })()`,
-      awaitPromise: true,
+      awaitPromise,
       returnByValue: true,
       userGesture: true,
-    });
+    }, timeoutMs);
     if (r.exceptionDetails) {
       const d = r.exceptionDetails;
       throw new Error(`页面内异常：${d.exception?.description || d.text}`);
@@ -1396,6 +1396,377 @@ try {
     versionInfo.updateStatus === 200 && /text\/markdown|text\/plain/.test(String(versionInfo.updateType || '')),
     `HTTP ${versionInfo.updateStatus} type=${versionInfo.updateType}`);
 
+  /* ── 场景 P：文本层缩放 / 查找 / 目录随文档切换 / 一键修复 ── */
+  console.log('\n— 场景 P：文本层、查找、目录与一键修复 —');
+
+  const textLayer = await cdp.eval(`
+    const buf = await (await fetch('/tests/fixtures/sample-long.caj')).arrayBuffer();
+    await window.__caj.openFile(new File([buf], 'text-layer.caj'));
+    await new Promise((r) => setTimeout(r, 1200));
+    await window.__caj.renderVisiblePages();
+    await new Promise((r) => setTimeout(r, 1400));
+
+    // 取当前活动文档里的第一个页面（多标签下 DOM 里可能有别的容器）
+    const page = window.__caj.pagesEl.querySelector('.page');
+    const layer = page && page.querySelector('.textLayer');
+    const spans = layer ? Array.from(layer.querySelectorAll('span')) : [];
+    const scaleFactor = parseFloat(page.style.getPropertyValue('--scale-factor')) || 1;
+    const boxes = spans.slice(0, 40).map((s) => {
+      const r = s.getBoundingClientRect();
+      const cs = getComputedStyle(s);
+      return { t: s.textContent, w: r.width, h: r.height, top: r.top, left: r.left,
+        fs: parseFloat(cs.fontSize), fh: parseFloat(cs.getPropertyValue('--font-height')) || 0 };
+    });
+    const withText = boxes.filter((b) => b.t && b.t.trim());
+    const expected = (b) => b.fh * scaleFactor;
+    const badSize = withText.filter((b) => b.fh > 0 && Math.abs(b.fs - expected(b)) > Math.max(1, expected(b) * 0.15));
+    const huge = withText.filter((b) => b.h > 60);
+    const totalScale = page ? getComputedStyle(page).getPropertyValue('--total-scale-factor').trim() : '';
+
+    // 真正的「字体重叠」判据：两个不同的 span 盒子大面积互相压住
+    const pageRect = page.getBoundingClientRect();
+    const overlaps = [];
+    for (let i = 0; i < withText.length; i++) {
+      for (let j = i + 1; j < withText.length; j++) {
+        const a = withText[i]; const b = withText[j];
+        if (!a.t.trim() || !b.t.trim()) continue;
+        const ox = Math.min(a.left + a.w, b.left + b.w) - Math.max(a.left, b.left);
+        const oy = Math.min(a.top + a.h, b.top + b.h) - Math.max(a.top, b.top);
+        if (ox <= 0 || oy <= 0) continue;
+        const ratio = (ox * oy) / Math.max(1, Math.min(a.w * a.h, b.w * b.h));
+        if (ratio > 0.6) overlaps.push({ a: a.t.slice(0, 12), b: b.t.slice(0, 12), ratio: +ratio.toFixed(2) });
+      }
+    }
+
+    // 查找：在同一个文档里找一个一定能命中的片段
+    window.__caj.openSearch();
+    document.querySelector('#searchInput').value = 'a';
+    document.querySelector('#searchInput').dispatchEvent(new Event('input', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 1400));
+    const count = document.querySelector('#searchCount').textContent;
+
+    return {
+      pageCount: window.__caj.state.numPages,
+      spanTotal: spans.length,
+      spanWithText: withText.length,
+      badSizeCount: badSize.length,
+      badSizeSample: badSize[0] || null,
+      hugeCount: huge.length,
+      overlaps: overlaps.slice(0, 5),
+      overlapCount: overlaps.length,
+      scaleFactor,
+      totalScale,
+      pageRect: pageRect.toJSON(),
+      firstBox: withText[0] || null,
+      searchCount: count,
+      searchHits: window.__caj.state && window.__caj.state.searchCount,
+    };
+  `);
+  check('文本层已生成且每个 span 都有文字',
+    textLayer.spanTotal > 0 && textLayer.spanWithText === textLayer.spanTotal,
+    `span=${textLayer.spanTotal} 有文字=${textLayer.spanWithText} 文档页数=${textLayer.pageCount}`);
+  check('文本层字号与页面缩放一致（否则文字会叠成一团）',
+    textLayer.badSizeCount === 0 && textLayer.hugeCount === 0,
+    `不符=${textLayer.badSizeCount} 超高=${textLayer.hugeCount} scale=${textLayer.scaleFactor} --total-scale-factor=${textLayer.totalScale} 首个=${JSON.stringify(textLayer.badSizeSample || textLayer.firstBox)}`);
+  check('同一页里的文本层 span 不互相压住（用户报的「字体重叠」）',
+    textLayer.overlapCount === 0,
+    `重叠对=${textLayer.overlapCount} ${JSON.stringify(textLayer.overlaps)} 页盒子=${JSON.stringify(textLayer.pageRect)}`);
+  check('查找在同一文档里能命中并给出计数',
+    /\d+\/\d+/.test(String(textLayer.searchCount || '')),
+    `计数=${textLayer.searchCount}`);
+
+  // 目录面板必须跟着文档切换：打开两个文档，切回来时目录要是「这个文档」的
+  const outlineSwitch = await cdp.eval(`
+    const snap = () => {
+      const pane = document.querySelector('#paneOutline');
+      return {
+        empty: !!pane.querySelector('.pane-empty'),
+        links: pane.querySelectorAll('.olink').length,
+        first: (pane.querySelector('.olink .otitle') || {}).textContent || '',
+        outlineLen: (window.__caj.state.outline || []).length,
+        numPages: window.__caj.state.numPages,
+        name: window.__caj.state.fileName,
+        token: window.__caj.state.loadToken,
+      };
+    };
+    const buf = await (await fetch('/tests/fixtures/sample.caj')).arrayBuffer();
+    await window.__caj.openFile(new File([buf], 'outline-a.caj'));
+    await new Promise((r) => setTimeout(r, 1600));
+    const first = snap();
+    const docs = window.__caj.docs.list();
+    const prev = docs.find((d) => d.fileName === 'text-layer.caj');
+    let switched = null;
+    let back = null;
+    if (prev) {
+      await window.__caj.docs.switchTo(prev.id);
+      await new Promise((r) => setTimeout(r, 1400));
+      switched = snap();
+      const backTab = window.__caj.docs.list().find((d) => d.fileName === 'outline-a.caj');
+      if (backTab) { await window.__caj.docs.switchTo(backTab.id); await new Promise((r) => setTimeout(r, 1600)); back = snap(); }
+    }
+    return { first, switched, back };
+  `);
+  check('目录面板跟随文档切换（切回旧标签时显示的是该文档的目录）',
+    outlineSwitch.first.links >= 1 && outlineSwitch.back && outlineSwitch.back.links >= 1,
+    `A=${JSON.stringify(outlineSwitch.first)} 切走=${JSON.stringify(outlineSwitch.switched)} 切回=${JSON.stringify(outlineSwitch.back)}`);
+
+  // 目录解析在途时切标签：A 的解析结果绝不许落到 B 头上（否则 B 的目录面板
+  // 会凭空出现 A 的书签，或把 B 自己的目录清掉）——切回 A 时 A 的目录也不能丢。
+  const outlineRace = await cdp.eval(`
+    const phase = [];
+    window.__racePhase = phase;
+    const snapOutline = () => {
+      const act = window.__caj.docs.list().find((d) => d.active);
+      return {
+        paneLinks: document.querySelectorAll('#paneOutline .olink').length,
+        outlineLen: (window.__caj.state.outline || []).length,
+        ctxOutline: Array.isArray(act?.ctx?.outline) ? act.ctx.outline.length : null,
+        name: window.__caj.state.fileName,
+      };
+    };
+    const buf = await (await fetch('/tests/fixtures/sample.caj')).arrayBuffer();
+    phase.push('fetched');
+    await window.__caj.openFile(new File([buf], 'race-a.caj'));
+    phase.push('opened');
+    // 立刻切走，让 A 的 loadOutline() 还在 await 里
+    const docs = window.__caj.docs.list();
+    const a = docs.find((d) => d.fileName === 'race-a.caj');
+    const b = docs.find((d) => d.fileName === 'text-layer.caj');
+    const bId = b ? b.id : null;
+    if (bId) await window.__caj.docs.switchTo(bId);
+    phase.push('switched');
+    await new Promise((r) => setTimeout(r, 2500));
+    const onB = snapOutline();
+    phase.push('snappedB');
+    if (a) await window.__caj.docs.switchTo(a.id);
+    phase.push('backA');
+    await new Promise((r) => setTimeout(r, 2000));
+    const backOnA = snapOutline();
+    phase.push('done');
+    return { onB, backOnA, bName: b && b.fileName };
+  `);
+  check('目录解析在途时切标签，结果不会落到另一个文档上',
+    outlineRace.onB.name === outlineRace.bName && outlineRace.onB.paneLinks === 0 && outlineRace.onB.outlineLen === 0,
+    `切到B时=${JSON.stringify(outlineRace.onB)}`);
+  check('竞态后切回原文档，目录依然完整',
+    outlineRace.backOnA.paneLinks >= 1 && outlineRace.backOnA.outlineLen >= 1,
+    `切回A=${JSON.stringify(outlineRace.backOnA)}`);
+
+  const repair = await cdp.eval(`
+    const readBox = () => {
+      const span = window.__caj.pagesEl.querySelector('.textLayer span');
+      if (!span) return null;
+      const cs = getComputedStyle(span);
+      return { fs: parseFloat(cs.fontSize), fh: parseFloat(cs.getPropertyValue('--font-height')) || 0 };
+    };
+    // 人为把文本层的缩放变量打坏，模拟线上旧版本/异常状态
+    const page = window.__caj.pagesEl.querySelector('.page');
+    page.style.setProperty('--total-scale-factor', 'initial');
+    page.style.setProperty('--scale-factor', 'initial');
+    page.style.setProperty('--user-unit', 'initial');
+    const broken = readBox();
+
+    const detected = (await window.__caj.detectRuntimeIssues()).map((i) => i.code);
+    const res = await window.__caj.repairRuntime({ reason: 'e2e' });
+    await new Promise((r) => setTimeout(r, 1500));
+    return {
+      detected,
+      fixed: res.fixed.length,
+      remaining: res.remaining.map((i) => i.code),
+      broken,
+      after: readBox(),
+    };
+  `);
+  check('自检能发现文本层缩放异常',
+    repair.detected.includes('text-scale-broken'), `detected=${JSON.stringify(repair.detected)} 打坏后=${JSON.stringify(repair.broken)}`);
+  check('一键修复后文本层缩放异常消失',
+    !repair.remaining.includes('text-scale-broken') && repair.after && repair.after.fh > 0,
+    `fixed=${repair.fixed} 剩余=${JSON.stringify(repair.remaining)} 修复后=${JSON.stringify(repair.after)}`);
+  await cdp.screenshot(join(OUT, '21-self-repair.png'));
+
+  // 审核发现的误报与体验退化（task-6）：正常文档不许报异常，健康时一键修复必须什么都不做
+  const healthy = await cdp.eval(`
+    const canvasOf = () => window.__caj.pagesEl.querySelector('.page canvas');
+    const before = canvasOf();
+    before.dataset.mark = 'keep';
+    const issues = (await window.__caj.detectRuntimeIssues()).map((i) => i.code);
+    const t0 = performance.now();
+    const res = await window.__caj.repairRuntime({ reason: 'e2e-healthy' });
+    const ms = performance.now() - t0;
+    const afterCanvas = canvasOf();
+    return {
+      issues,
+      fixed: res.fixed.length,
+      remaining: res.remaining.map((i) => i.code),
+      ms: Math.round(ms),
+      canvasReused: !!afterCanvas && afterCanvas.dataset.mark === 'keep',
+    };
+  `);
+  check('正常文档自检不误报（有文字页必须有文本层，无文字页不算异常）',
+    healthy.issues.filter((c) => c !== 'no-document').length === 0,
+    `issues=${JSON.stringify(healthy.issues)} fixed=${healthy.fixed}`);
+  check('健康文档上点一键修复不做任何重建（不闪空白、不拆画布）',
+    healthy.canvasReused && healthy.ms < 1200,
+    `画布复用=${healthy.canvasReused} 耗时=${healthy.ms}ms remaining=${JSON.stringify(healthy.remaining)}`);
+  check('健康文档点一键修复不提示「修复后仍有异常」',
+    healthy.remaining.length === 0 && healthy.fixed === 0,
+    `fixed=${healthy.fixed} remaining=${JSON.stringify(healthy.remaining)}`);
+
+  // 自检要复用每页的文字缓存（只查一次文本内容），并缓存成功结果 ——
+  // 一旦把失败也缓存成「本页无文字」，该页整个会话都会被漏报。
+  const textCache = await cdp.eval(`
+    const restore = [];
+    const patch = (proto, name) => {
+      const orig = proto[name]; let calls = 0;
+      proto[name] = function (...a) { calls += 1; return orig.apply(this, a); };
+      restore.push(() => { proto[name] = orig; });
+      return () => calls;
+    };
+    const pages = window.__caj.state.pages.filter((p) => p.rendered).map((p) => p.pdfPage).filter(Boolean);
+    if (!pages.length) return { skip: true };
+    const callsOf = pages.map((pg) => patch(Object.getPrototypeOf(pg), 'getTextContent'));
+    await window.__caj.detectRuntimeIssues();
+    const firstPass = callsOf.reduce((n, f) => n + f(), 0);
+    await window.__caj.detectRuntimeIssues();
+    const secondPass = callsOf.reduce((n, f) => n + f(), 0) - firstPass;
+    restore.forEach((f) => f());
+    return { skip: false, pages: pages.length, firstPass, secondPass };
+  `);
+  check('自检复用文字缓存（第二次自检不再重复取文本内容）',
+    textCache.skip || textCache.secondPass === 0,
+    `页数=${textCache.pages} 首次往返=${textCache.firstPass} 第二次=${textCache.secondPass}`);
+
+  // 自动自修复：打开文档后会自动跑一次（不用用户点），但必须「没坏就不乱动」
+  const autoHeal = await cdp.eval(`
+    const canvasOf = () => window.__caj.pagesEl.querySelector('.page canvas');
+    const before = canvasOf();
+    before.dataset.mark = 'auto';
+    window.__caj.resetSelfHealCooldown();
+    const res = await window.__caj.selfHealNow('e2e');
+    const after = canvasOf();
+    const off = window.__caj.setAutoSelfHeal(false);
+    const offState = window.__caj.autoSelfHeal;
+    const back = window.__caj.setAutoSelfHeal(true);
+    return {
+      ran: !!res,
+      fixed: res ? res.fixed.length : -1,
+      canvasReused: !!after && after.dataset.mark === 'auto',
+      off, offState, back,
+      onState: window.__caj.autoSelfHeal,
+    };
+  `);
+  check('自动自修复：健康文档上跑一遍也不会拆画布',
+    autoHeal.ran && autoHeal.fixed === 0 && autoHeal.canvasReused,
+    `fixed=${autoHeal.fixed} 画布复用=${autoHeal.canvasReused}`);
+  check('自动自修复开关可关闭并持久化回读',
+    autoHeal.off === false && autoHeal.offState === false && autoHeal.back === true && autoHeal.onState === true,
+    `off=${autoHeal.off} offState=${autoHeal.offState} back=${autoHeal.back} onState=${autoHeal.onState}`);
+
+  // 自动自修复要真的能修好被人为打坏的文本层
+  const autoHealFixes = await cdp.eval(`
+    const span = window.__caj.pagesEl.querySelector('.textLayer span');
+    const page = window.__caj.pagesEl.querySelector('.page');
+    page.style.setProperty('--total-scale-factor', 'initial');
+    page.style.setProperty('--scale-factor', 'initial');
+    page.style.setProperty('--user-unit', 'initial');
+    const broken = parseFloat(getComputedStyle(span).fontSize);
+    const res = await window.__caj.selfHealNow('e2e-force', { force: true });
+    await new Promise((r) => setTimeout(r, 800));
+    const span2 = window.__caj.pagesEl.querySelector('.textLayer span');
+    const after = span2 ? parseFloat(getComputedStyle(span2).fontSize) : 0;
+    const left = (await window.__caj.detectRuntimeIssues()).filter((i) => i.code === 'text-scale-broken').length;
+    return { broken, fixed: res ? res.fixed.length : -1, after, left };
+  `);
+  check('自动自修复能修好被打坏的文本层（无需用户点击）',
+    autoHealFixes.fixed >= 1 && autoHealFixes.after > autoHealFixes.broken && autoHealFixes.left === 0,
+    `打坏=${autoHealFixes.broken}px fixed=${autoHealFixes.fixed} 修后=${autoHealFixes.after}px 剩余=${autoHealFixes.left}`);
+
+  // 单页模式下「视口内页面」只能是当前那一页（否则一键修复会重画整篇文档）
+  const singlePage = await cdp.eval(`
+    window.__caj.setScrollMode('single');
+    await new Promise((r) => setTimeout(r, 600));
+    const inBand = window.__caj.pagesInBand().map((p) => p.num);
+    const total = window.__caj.state.numPages;
+    window.__caj.setScrollMode('continuous');
+    await new Promise((r) => setTimeout(r, 600));
+    return { inBand, total, visiblePages: window.__caj.pagesEl.querySelectorAll('.page:not([hidden])').length };
+  `);
+  check('单页模式下视口内只算当前页（修复不会重画整篇）',
+    singlePage.inBand.length === 1 && singlePage.total > 1,
+    `inBand=${JSON.stringify(singlePage.inBand)} 总页=${singlePage.total}`);
+
+  // CAJ 经过引擎探测可能被判成 kdh，界面上必须显示用户拿到的格式
+  const badge = await cdp.eval(`
+    return {
+      badge: document.querySelector('#formatBadge').textContent,
+      hidden: document.querySelector('#formatBadge').hidden,
+      fmt: document.querySelector('#formatBadge').dataset.fmt,
+      title: document.querySelector('#formatBadge').title,
+      name: window.__caj.state.fileName,
+    };
+  `);
+  check('格式徽章显示用户拿到的格式（.caj 不显示成 KDH）',
+    !badge.hidden && badge.badge === 'CAJ', JSON.stringify(badge));
+  // 徽章要能解释「凭什么说是 CAJ」—— 用户报的「明明 CAJ 却显示 KDH」就是靠这条定位的
+  check('格式徽章的推断依据能对用户解释（扩展名/引擎探测/按 PDF 渲染）',
+    /^文件扩展名 \.caj$/.test(badge.title), `title=${badge.title}`);
+
+  // ── 保存 PDF：文件名 / 大小 / 保存通道 / 下载地址 ──
+  // 用户报的「增加 pdf 下载优化，显示下载地址」：面板必须把这几件事都摊开。
+  const exportSheet = await cdp.eval(`
+    window.__caj.closeExportSheet();
+    document.querySelector('#btnDownload').click();
+    const st = window.__caj.exportPanelState();
+    const blob = window.__caj.state.pdfBlob;
+    return {
+      st,
+      open: !document.querySelector('#exportOverlay').hidden,
+      hasBlob: !!(blob && blob.size > 0),
+      blobSize: blob ? blob.size : 0,
+      objectUrl: String(window.__caj.state.objectUrl || ''),
+      linkShown: document.querySelector('#exportLink').textContent,
+    };
+  `);
+  check('点「保存 PDF」打开保存面板（不再直接闷头下载）',
+    exportSheet.open && exportSheet.st.open, JSON.stringify(exportSheet.st));
+  check('保存面板给出文件名、页数、实际大小',
+    /\.pdf$/.test(exportSheet.st.name)
+    && /\d+\s*页/.test(exportSheet.st.detail)
+    && exportSheet.hasBlob,
+    `detail=${exportSheet.st.detail} blob=${exportSheet.blobSize}`);
+  check('保存面板说明走哪条保存通道（分享面板 / 另存为 / 浏览器下载）',
+    /保存方式：/.test(exportSheet.st.modeText), `modeText=${exportSheet.st.modeText}`);
+  check('保存面板显示下载地址（blob:，与当前文档的 objectUrl 一致）',
+    exportSheet.objectUrl.startsWith('blob:')
+    && exportSheet.st.link === exportSheet.objectUrl
+    && exportSheet.linkShown === exportSheet.objectUrl,
+    `link=${exportSheet.st.link} objectUrl=${exportSheet.objectUrl}`);
+
+  // 文件名净化：用户能自己改名字，非法字符与路径分隔符必须挡掉
+  const safeName = await cdp.eval(`
+    const s = window.__caj.sanitizePdfName;
+    return {
+      slash: s('C:\\\\a b\\\\笔记 v2.caj'),
+      illegal: s('a<b>:"|?*.caj'),
+      noExt: s('笔记'),
+      empty: s('   '),
+      keepsPdf: s('report.pdf'),
+    };
+  `);
+  check('保存文件名会被净化（去掉路径与非法字符、补 .pdf）',
+    safeName.slash === 'C__a b_笔记 v2.pdf'
+    && safeName.illegal === 'a_b______.pdf'
+    && safeName.noExt === '笔记.pdf'
+    && safeName.empty === 'document.pdf'
+    && safeName.keepsPdf === 'report.pdf',
+    JSON.stringify(safeName));
+
+  const exportClosed = await cdp.eval(`
+    window.__caj.closeExportSheet();
+    return { open: !document.querySelector('#exportOverlay').hidden, state: window.__caj.exportPanelState().open };
+  `);
+  check('保存面板可以关掉', !exportClosed.open && !exportClosed.state, JSON.stringify(exportClosed));
+
 } catch (err) {
   check('测试流程本身未抛异常', false, err.message);
   console.error('\n' + (err.stack || err.message));
@@ -1409,6 +1780,10 @@ try {
   console.error(pageErrors.length ? pageErrors.map((t) => `  · ${t}`).join('\n') : '  （无）');
 
   try {
+    // 页面主线程若被死循环占死，这里也会超时 —— 用短超时+不等 promise 取回已有的阶段标记
+    const phase = await cdp.eval('return window.__racePhase || null;', { timeoutMs: 8000, awaitPromise: false }).catch(() => null);
+    console.error('— 目录竞态阶段标记 —');
+    console.error(phase ? phase.join(' → ') : '（没有标记，说明卡在更早的位置）');
     const diag = await cdp.eval(`
       return {
         href: location.href,
@@ -1416,7 +1791,7 @@ try {
         resources: performance.getEntriesByType('resource').map(r => r.name.replace(location.origin, '')).slice(0, 40),
         emptyText: document.querySelector('#empty')?.textContent?.trim().slice(0, 60),
       };
-    `);
+    `, { timeoutMs: 15000 });
     console.error('— 页面诊断 —');
     console.error(JSON.stringify(diag, null, 2));
   } catch (e2) {

@@ -168,6 +168,30 @@
   </div>
 </div>
 
+<!-- ANCHOR:export  保存 PDF 面板；让用户看清「存成什么名字、多大、走哪条保存通道」 -->
+<div id="exportOverlay" class="modal-overlay" hidden>
+  <div class="modal export-modal" role="dialog" aria-modal="true" aria-labelledby="exportTitle">
+    <h2 id="exportTitle">保存 PDF</h2>
+    <p id="exportDetail" class="modal-detail">准备中</p>
+    <label class="export-field">
+      <span>文件名</span>
+      <input id="exportName" type="text" autocomplete="off" spellcheck="false" />
+    </label>
+    <p id="exportMode" class="export-mode"></p>
+    <details id="exportLinkBox" class="export-link" hidden>
+      <summary>下载地址（blob:）</summary>
+      <p id="exportLink" class="export-link-text"></p>
+      <p class="export-link-hint" id="exportLinkHint"></p>
+    </details>
+    <div class="modal-actions">
+      <button id="btnExportCancel" class="ghost-btn">取消</button>
+      <button id="btnExportCopy" class="ghost-btn">复制地址</button>
+      <button id="btnExportSave" class="primary-btn">保存</button>
+    </div>
+    <p id="exportHint" class="export-hint"></p>
+  </div>
+</div>
+
 <div id="toast" class="toast" hidden></div>
 
 <!-- 注意两点：
