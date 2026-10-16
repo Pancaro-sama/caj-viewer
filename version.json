@@ -1,9 +1,9 @@
 {
   "app": "2.0.0",
-  "build": "2026-10-15T14:11:46.691Z",
-  "commit": "f266bd3",
+  "build": "2026-10-16T14:26:08.760Z",
+  "commit": "c8f354d",
   "channel": "release",
-  "releasedAt": "2026-10-15T14:11:54.693Z",
+  "releasedAt": "2026-10-16T14:26:18.786Z",
   "files": [
     "caj-viewer-ipad-full.zip",
     "caj-viewer-ipad-lite.zip"

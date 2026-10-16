@@ -1985,8 +1985,22 @@ const exportSheet = { open: false, busy: false, mode: 'anchor' };
 const isAppleMobile = /iPad|iPhone|iPod/.test(navigator.userAgent)
   || (navigator.platform === 'MacIntel' && (navigator.maxTouchPoints || 0) > 1);
 
+/**
+ * 能不能把文件交给系统分享面板。
+ *
+ * 注意必须**拿真的 File 去问 canShare**：桌面 Chrome 也有 navigator.canShare，
+ * 但它只认文本 / URL，传 files 会返回 false。只检查函数存在会让桌面端误判成
+ * 「支持分享」，用户点保存后弹出提示、再悄悄退回下载 —— 这正是之前测试里
+ * 期望「浏览器下载」却拿到「系统分享面板」的原因。
+ */
 function canShareFile() {
-  return typeof navigator.canShare === 'function' && typeof navigator.share === 'function';
+  if (typeof navigator.canShare !== 'function' || typeof navigator.share !== 'function') return false;
+  try {
+    const probe = new File([new Blob(['%PDF-1.4'])], 'probe.pdf', { type: 'application/pdf' });
+    return navigator.canShare({ files: [probe] });
+  } catch {
+    return false;
+  }
 }
 
 function canUseSavePicker() {
@@ -2030,7 +2044,16 @@ async function copyText(text) {
 }
 
 function exportModeInfo() {
+  // 顺序有讲究：桌面 Chromium 两者都支持时，另存为对话框更合直觉（能选目录、有进度），
+  // 分享面板是 iPad 上「存储到文件」的唯一稳定通道，只留给苹果移动端。
   // 「存到哪里」是用户点保存前最想知道的事，各条通道的下落不一样，分开说清楚。
+  if (canUseSavePicker()) {
+    return {
+      id: 'picker',
+      label: '另存为对话框',
+      hint: '点「保存」后弹出系统另存为对话框，目录和文件名都可以自己选，写入过程会显示进度。',
+    };
+  }
   if (canShareFile()) {
     return {
       id: 'share',
@@ -2038,13 +2061,6 @@ function exportModeInfo() {
       hint: isAppleMobile
         ? '点「保存」后弹出分享面板，选「存储到文件」可以放进「文件」App 的下载项或 iCloud 云盘。整个转换与保存都在本机完成，文件不会上传到任何服务器。'
         : '点「保存」后弹出系统分享面板，可选择保存位置或分享给其它 App。',
-    };
-  }
-  if (canUseSavePicker()) {
-    return {
-      id: 'picker',
-      label: '另存为对话框',
-      hint: '点「保存」后弹出系统另存为对话框，目录和文件名都可以自己选，写入过程会显示进度。',
     };
   }
   return {
@@ -2941,6 +2957,11 @@ globalThis.__caj = {
   saveExport,
   sanitizePdfName,
   exportMode: () => exportSheet.mode,
+  exportCaps: () => ({
+    savePicker: canUseSavePicker(),
+    share: canShareFile(),
+    appleMobile: isAppleMobile,
+  }),
   exportPanelState: () => ({
     open: exportSheet.open,
     mode: exportSheet.mode,

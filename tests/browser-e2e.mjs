@@ -1718,8 +1718,14 @@ try {
     document.querySelector('#btnDownload').click();
     const st = window.__caj.exportPanelState();
     const blob = window.__caj.state.pdfBlob;
+    const caps = window.__caj.exportCaps();
+    // 优先级：桌面另存为 > 分享面板 > 浏览器下载。断言「实际选中的通道」等于
+    // 「按优先级从真实能力推出来的通道」—— 不硬编码某个环境的结论。
+    const priorityMode = caps.savePicker ? 'picker' : (caps.share ? 'share' : 'anchor');
     return {
       st,
+      caps,
+      expectMode: priorityMode,
       open: !document.querySelector('#exportOverlay').hidden,
       hasBlob: !!(blob && blob.size > 0),
       blobSize: blob ? blob.size : 0,
@@ -1734,8 +1740,11 @@ try {
     && /\d+\s*页/.test(exportSheet.st.detail)
     && exportSheet.hasBlob,
     `detail=${exportSheet.st.detail} blob=${exportSheet.blobSize}`);
+  // 通道必须跟浏览器真实能力一致：桌面 Chrome 的 navigator.canShare 不认 files，
+  // 只检查函数存在会把「浏览器下载」误报成「系统分享面板」。
   check('保存面板说明走哪条保存通道（分享面板 / 另存为 / 浏览器下载）',
-    /保存方式：/.test(exportSheet.st.modeText), `modeText=${exportSheet.st.modeText}`);
+    /保存方式：/.test(exportSheet.st.modeText) && exportSheet.st.mode === exportSheet.expectMode,
+    `modeText=${exportSheet.st.modeText} mode=${exportSheet.st.mode} expect=${exportSheet.expectMode} caps=${JSON.stringify(exportSheet.caps)}`);
   check('保存面板显示下载地址（blob:，与当前文档的 objectUrl 一致）',
     exportSheet.objectUrl.startsWith('blob:')
     && exportSheet.st.link === exportSheet.objectUrl
