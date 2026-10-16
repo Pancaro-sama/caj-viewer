@@ -1,0 +1,653 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>CAJ 阅读器 · 实验版（可能不稳定）</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+<meta name="color-scheme" content="light dark" />
+<meta name="description" content="纯前端、零后端的 CAJ/KDH/HN/C8/PDF 阅读器（实验版：修了文本层/查找/目录跟随，但可能还有 bug）。" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="CAJ 阅读器 实验版" />
+<meta name="format-detection" content="telephone=no" />
+<!-- 实验版故意不提供 manifest：避免被「添加到主屏幕」后与稳定版混淆 -->
+<link rel="icon" href="./app/icon.svg" type="image/svg+xml" />
+<script src="./app/compat.js"></script>
+<link rel="stylesheet" href="./vendor/pdfjs/pdf_viewer.css" />
+<link rel="stylesheet" href="./app/style.css" />
+<link rel="stylesheet" href="./app/style-docs.css" />
+<link rel="stylesheet" href="./app/style-settings.css" />
+<link rel="stylesheet" href="./app/style-pinch.css" />
+<style>
+  /* 实验版横幅：任何一屏都要能看见「这是实验版」，并给一条回稳定版的路。 */
+  #expBanner {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 9999;
+    display: flex; gap: 8px; align-items: center; justify-content: center;
+    padding: 6px 10px calc(6px + env(safe-area-inset-bottom, 0px));
+    font: 500 12px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    color: #fff5e6; background: rgba(150, 78, 0, 0.94);
+    border-top: 1px solid rgba(255, 220, 170, 0.45);
+    pointer-events: none;
+  }
+  #expBanner a { color: #ffe9c7; text-decoration: underline; pointer-events: auto; }
+  body { padding-bottom: 34px; }
+</style>
+</head>
+<body>
+
+<!-- 实验版横幅：先说清楚这是实验版、可能不稳定，并给一条回稳定版的路。 -->
+<div id="expBanner">
+  <span>实验版 · 可能不稳定</span>
+  <a href="../">回到稳定版</a>
+  <a href="./EXPERIMENTAL.md" target="_blank" rel="noopener">改了什么</a>
+</div>
+
+<!-- ─────────────────────────  图标精灵  ───────────────────────── -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <g id="i-sidebar"><rect x="2.5" y="3.5" width="19" height="17" rx="2.5"/><path d="M9.5 3.5v17"/></g>
+    <g id="i-open"><path d="M3 6.5A2 2 0 0 1 5 4.5h3.6a2 2 0 0 1 1.5.7l1 1.3H19a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></g>
+    <g id="i-prev"><path d="M14.5 5.5 8 12l6.5 6.5"/></g>
+    <g id="i-next"><path d="M9.5 5.5 16 12l-6.5 6.5"/></g>
+    <g id="i-minus"><circle cx="12" cy="12" r="9"/><path d="M8 12h8"/></g>
+    <g id="i-plus"><circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/></g>
+    <g id="i-fit-width"><path d="M3 5v14M21 5v14M7 8l-3 4 3 4M17 8l3 4-3 4"/></g>
+    <g id="i-fit-page"><rect x="4" y="3.5" width="16" height="17" rx="2"/><path d="M8 9.5h8M8 13h5"/></g>
+    <g id="i-rotate"><path d="M20 12a8 8 0 1 1-2.5-5.8"/><path d="M20.5 3.5v5h-5"/></g>
+    <g id="i-search"><circle cx="11" cy="11" r="6.5"/><path d="M15.8 15.8 21 21"/></g>
+    <g id="i-download"><path d="M12 3.5v11"/><path d="m7.5 10 4.5 4.5L16.5 10"/><path d="M4 17.5v1A2 2 0 0 0 6 20.5h12a2 2 0 0 0 2-2v-1"/></g>
+    <g id="i-theme"><circle cx="12" cy="12" r="4.5"/><path d="M12 2v2.5M12 19.5V22M2 12h2.5M19.5 12H22M4.9 4.9l1.8 1.8M17.3 17.3l1.8 1.8M19.1 4.9l-1.8 1.8M6.7 17.3l-1.8 1.8"/></g>
+    <g id="i-settings"><circle cx="12" cy="12" r="3.2"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1.03 1.56V21a2 2 0 1 1-4 0v-.11a1.7 1.7 0 0 0-1.11-1.56 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.56-1.03H3a2 2 0 1 1 0-4h.11a1.7 1.7 0 0 0 1.56-1.11 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34H9a1.7 1.7 0 0 0 1.03-1.56V3a2 2 0 1 1 4 0v.11a1.7 1.7 0 0 0 1.03 1.56 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87V9a1.7 1.7 0 0 0 1.56 1.03H21a2 2 0 1 1 0 4h-.11a1.7 1.7 0 0 0-1.49 1.03z"/></g>
+    <g id="i-close"><path d="M6 6l12 12M18 6L6 18"/></g>
+    <g id="i-up"><path d="M12 19V5"/><path d="m5.5 11.5 6.5-6.5 6.5 6.5"/></g>
+    <g id="i-down"><path d="M12 5v14"/><path d="m5.5 12.5 6.5 6.5 6.5-6.5"/></g>
+    <g id="i-book"><path d="M4 5.5A2 2 0 0 1 6 3.5h5v17H6a2 2 0 0 0-2 2z"/><path d="M20 5.5a2 2 0 0 0-2-2h-5v17h5a2 2 0 0 1 2 2z"/></g>
+    <g id="i-grid"><rect x="3.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.5"/></g>
+  </defs>
+</svg>
+
+<!-- ─────────────────────────  工具栏  ───────────────────────── -->
+<header id="toolbar">
+  <div class="tb-left">
+    <button id="btnSidebar" class="icon-btn" title="侧栏（目录 / 缩略图）" aria-label="侧栏">
+      <svg viewBox="0 0 24 24"><use href="#i-sidebar"/></svg>
+    </button>
+    <label id="btnOpen" class="icon-btn" for="fileInput" role="button" tabindex="0" title="打开文件" aria-label="打开文件">
+      <svg viewBox="0 0 24 24"><use href="#i-open"/></svg>
+    </label>
+    <div id="docInfo" class="doc-info">
+      <span id="fileName">未打开文件</span>
+      <span id="formatBadge" class="badge" hidden></span>
+    </div>
+  </div>
+
+  <div class="tb-center">
+    <button id="btnPrev" class="icon-btn" title="上一页" aria-label="上一页"><svg viewBox="0 0 24 24"><use href="#i-prev"/></svg></button>
+    <div class="pager" title="跳转到页码">
+      <input id="pageInput" type="text" inputmode="numeric" value="1" aria-label="当前页" />
+      <span class="pager-sep">/</span>
+      <span id="pageCount">0</span>
+    </div>
+    <button id="btnNext" class="icon-btn" title="下一页" aria-label="下一页"><svg viewBox="0 0 24 24"><use href="#i-next"/></svg></button>
+  </div>
+
+  <div class="tb-right">
+    <button id="btnZoomOut" class="icon-btn" title="缩小" aria-label="缩小"><svg viewBox="0 0 24 24"><use href="#i-minus"/></svg></button>
+    <button id="btnZoomLevel" class="text-btn" title="恢复 100%">100%</button>
+    <button id="btnZoomIn" class="icon-btn" title="放大" aria-label="放大"><svg viewBox="0 0 24 24"><use href="#i-plus"/></svg></button>
+    <button id="btnFitWidth" class="icon-btn is-on" title="适应宽度" aria-label="适应宽度"><svg viewBox="0 0 24 24"><use href="#i-fit-width"/></svg></button>
+    <button id="btnFitPage" class="icon-btn" title="适应整页" aria-label="适应整页"><svg viewBox="0 0 24 24"><use href="#i-fit-page"/></svg></button>
+    <span class="tb-divider"></span>
+    <button id="btnRotate" class="icon-btn" title="旋转 90°" aria-label="旋转"><svg viewBox="0 0 24 24"><use href="#i-rotate"/></svg></button>
+    <button id="btnSearch" class="icon-btn" title="查找 (Ctrl+F)" aria-label="查找"><svg viewBox="0 0 24 24"><use href="#i-search"/></svg></button>
+    <button id="btnTheme" class="icon-btn" title="深浅色" aria-label="深浅色"><svg viewBox="0 0 24 24"><use href="#i-theme"/></svg></button>
+    <button id="btnSettings" class="icon-btn" title="设置" aria-label="设置"><svg viewBox="0 0 24 24"><use href="#i-settings"/></svg></button>
+    <button id="btnDownload" class="primary-btn" title="保存为 PDF">
+      <svg viewBox="0 0 24 24"><use href="#i-download"/></svg><span class="btn-label">保存 PDF</span>
+    </button>
+  </div>
+</header>
+
+<!-- ANCHOR:tabs  文件标签栏；由 app/docs.js 渲染，样式在 app/style-docs.css -->
+<div id="docTabs" class="doc-tabs" hidden>
+  <div id="docTabList" class="doc-tab-list" role="tablist"></div>
+  <button id="btnNewTab" class="doc-tab-new" title="打开新文件" aria-label="打开新文件">＋</button>
+</div>
+
+<!-- ─────────────────────────  查找栏  ───────────────────────── -->
+<div id="searchBar" class="search-bar" hidden>
+  <svg class="search-ico" viewBox="0 0 24 24"><use href="#i-search"/></svg>
+  <input id="searchInput" type="search" placeholder="在文档中查找…" autocomplete="off" spellcheck="false" />
+  <span id="searchCount" class="search-count"></span>
+  <button id="searchPrev" class="icon-btn" title="上一个"><svg viewBox="0 0 24 24"><use href="#i-up"/></svg></button>
+  <button id="searchNext" class="icon-btn" title="下一个"><svg viewBox="0 0 24 24"><use href="#i-down"/></svg></button>
+  <button id="searchClose" class="icon-btn" title="关闭"><svg viewBox="0 0 24 24"><use href="#i-close"/></svg></button>
+</div>
+
+<!-- ─────────────────────────  主体  ───────────────────────── -->
+<div id="stage">
+  <aside id="sidebar" class="sidebar" hidden>
+    <div class="sidebar-tabs">
+      <button class="tab is-on" data-tab="outline"><svg viewBox="0 0 24 24"><use href="#i-book"/></svg><span>目录</span></button>
+      <button class="tab" data-tab="thumbs"><svg viewBox="0 0 24 24"><use href="#i-grid"/></svg><span>缩略图</span></button>
+    </div>
+    <div class="sidebar-body">
+      <div id="paneOutline" class="pane"><p class="pane-empty">暂无目录</p></div>
+      <div id="paneThumbs" class="pane pane-thumbs" hidden></div>
+    </div>
+  </aside>
+  <div id="sidebarScrim" class="scrim" hidden></div>
+
+  <main id="viewerWrap">
+    <div id="viewer" class="viewer"></div>
+
+    <div id="empty" class="empty">
+      <div class="empty-card">
+        <div class="empty-logo">CAJ</div>
+        <h1>本地 CAJ 阅读器</h1>
+        <p class="empty-sub">拖动文件到此处，或点击下方按钮选择</p>
+
+        <!-- 刻意用 <label for> 而不是 <button> + JS 调用 input.click()：
+             iOS Safari 对「程序化点击一个 display:none 的 file input」很不可靠，
+             而 label 是浏览器原生激活，任何情况下都能打开选择器。 -->
+        <label id="btnOpenBig" class="cta" for="fileInput" role="button" tabindex="0">选择文件</label>
+
+        <p class="empty-hint">
+          支持 <code>.caj</code> <code>.kdh</code> <code>.hn</code> <code>.nh</code> <code>.c8</code> <code>.pdf</code>
+          —— 也支持任何扩展名的文件，格式按内容识别。<br />
+          全部解析与渲染都在你的浏览器里完成，文件不会上传到任何服务器。
+        </p>
+        <p class="empty-hint empty-hint-ios">
+          <strong>iPad 上文件是灰色的、点不动？</strong>
+          那是因为文件还只在「最近使用」里、并未真正下载到本机。
+          请先在「文件」App 中把它拷到「我的 iPad」或「iCloud 云盘」，再回到这里选择。
+        </p>
+        <p class="empty-hint">
+          按钮点了没反应？<button type="button" id="btnSelfCheck" class="link-btn">运行环境自检</button>
+        </p>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div id="dropOverlay" class="drop-overlay" hidden><div class="drop-inner">松开以打开文件</div></div>
+
+<!-- ANCHOR:settings  设置面板容器；内容由 app/settings.js 渲染，样式在 app/style-settings.css -->
+<div id="settingsOverlay" class="modal-overlay settings-overlay" hidden></div>
+
+<!-- ─────────────────────────  转换进度  ───────────────────────── -->
+<div id="progressOverlay" class="modal-overlay" hidden>
+  <div class="modal">
+    <h2 id="progressTitle">正在打开…</h2>
+    <p id="progressDetail" class="modal-detail">准备中</p>
+    <div class="bar"><div id="progressBar" class="bar-fill"></div></div>
+    <p id="progressPercent" class="modal-percent">0%</p>
+    <div class="modal-actions"><button id="btnCancel" class="ghost-btn">取消</button></div>
+  </div>
+</div>
+
+<!-- ANCHOR:export  保存 PDF 面板；让用户看清「存成什么名字、多大、走哪条保存通道」 -->
+<div id="exportOverlay" class="modal-overlay" hidden>
+  <div class="modal export-modal" role="dialog" aria-modal="true" aria-labelledby="exportTitle">
+    <h2 id="exportTitle">保存 PDF</h2>
+    <p id="exportDetail" class="modal-detail">准备中</p>
+    <label class="export-field">
+      <span>文件名</span>
+      <input id="exportName" type="text" autocomplete="off" spellcheck="false" />
+    </label>
+    <p id="exportMode" class="export-mode"></p>
+    <details id="exportLinkBox" class="export-link" hidden>
+      <summary>下载地址（blob:）</summary>
+      <p id="exportLink" class="export-link-text"></p>
+      <p class="export-link-hint" id="exportLinkHint"></p>
+    </details>
+    <div class="modal-actions">
+      <button id="btnExportCancel" class="ghost-btn">取消</button>
+      <button id="btnExportCopy" class="ghost-btn">复制地址</button>
+      <button id="btnExportSave" class="primary-btn">保存</button>
+    </div>
+    <p id="exportHint" class="export-hint"></p>
+  </div>
+</div>
+
+<div id="toast" class="toast" hidden></div>
+
+<!-- 注意两点：
+     1) 刻意不写 accept —— iOS 的「文件」选择器按 UTI 过滤，.caj / .kdh / .hn / .c8
+        在系统里没有登记的 UTI，一旦限制类型这些文件就会被置灰、根本点不动。
+     2) 刻意不用 hidden —— iOS Safari 对「程序化点击 display:none 的 file input」很不可靠。
+        这里改成移到屏幕外且透明，label 原生激活与 JS 调用两条路都能走通。 -->
+<input id="fileInput" type="file" />
+
+<script type="module" src="./app/app.js"></script>
+
+<!-- ─────────────────────────  启动看门狗  ─────────────────────────
+     这是一段普通脚本（不是模块），所以即使 app.js 因为任何原因完全没执行，
+     它依然会运行，并把卡住的原因直接显示在屏幕上。
+     iPad 上没有开发者工具，静默失败就等于「界面在，但点什么都没反应」。
+     app.js 的环境自检也复用这里的面板。 -->
+<script>
+(function () {
+  'use strict';
+
+  /* 顺手把控制台里的错误/警告也收起来。
+     浏览器自己会把「MIME 不对」「被 CSP 拒绝」这类原因说得非常明确，但这些只出现在
+     控制台里 —— 而 iPad 上根本没有控制台。收下来放进诊断面板，一次就能定位。 */
+  var consoleLog = [];
+  ['error', 'warn'].forEach(function (level) {
+    var original = console[level];
+    if (typeof original !== 'function') return;
+    console[level] = function () {
+      try {
+        var parts = [];
+        for (var i = 0; i < arguments.length; i++) {
+          var a = arguments[i];
+          parts.push(a && a.message ? a.message : String(a));
+        }
+        consoleLog.push(level + '：' + parts.join(' ').slice(0, 400));
+        if (consoleLog.length > 10) consoleLog.shift();
+      } catch (e) { /* 收集失败绝不能影响原本的行为 */ }
+      return original.apply(console, arguments);
+    };
+  });
+  var bootError = null;
+  var panel = null;
+
+  window.addEventListener('error', function (e) {
+    var t = e && e.target;
+    if (t && t.tagName === 'SCRIPT') {
+      bootError = '脚本未加载：' + (t.src || '(内联)');
+      // 脚本都报错了就没必要再干等 3 秒
+      if (!window.__caj) startWatchdog(1000);
+    } else if (e && e.message) {
+      bootError = e.message + (e.filename ? '  @ ' + e.filename + ':' + e.lineno : '');
+    }
+  }, true);
+  window.addEventListener('unhandledrejection', function (e) {
+    if (!bootError) bootError = '未处理的异常：' + ((e.reason && e.reason.message) || e.reason);
+  });
+
+  function esc(s) {
+    return String(s).replace(/[&<>"]/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+    });
+  }
+
+  function btnStyle(bg, fg) {
+    return 'font:inherit;font-size:14px;padding:9px 16px;border:0;border-radius:9px;cursor:pointer;'
+      + 'background:' + bg + ';color:' + fg + ';';
+  }
+
+  function hideDiag() {
+    if (panel && panel.parentNode) panel.parentNode.removeChild(panel);
+    panel = null;
+  }
+
+  /** 诊断面板。title/rows/tips 都由本文件与 app.js 提供，tips 允许含少量标签。 */
+  function showDiag(opts) {
+    hideDiag();
+    var wrap = document.createElement('div');
+    wrap.id = 'caj-diag';
+    wrap.setAttribute('style',
+      'position:fixed;inset:0;z-index:9999;overflow:auto;-webkit-overflow-scrolling:touch;'
+      + 'background:rgba(12,14,18,.72);padding:20px;'
+      + 'font:14px/1.6 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;');
+
+    var card = document.createElement('div');
+    card.setAttribute('style',
+      'max-width:540px;margin:0 auto;background:#fff;color:#1c1e21;border-radius:14px;padding:20px;'
+      + 'box-shadow:0 18px 48px rgba(0,0,0,.35);');
+
+    var html = '<h2 style="margin:0 0 12px;font-size:17px">' + esc(opts.title) + '</h2>';
+    if (opts.rows && opts.rows.length) {
+      html += '<table style="width:100%;border-collapse:collapse;font-size:13px">';
+      for (var i = 0; i < opts.rows.length; i++) {
+        var r = opts.rows[i];
+        html += '<tr>'
+          + '<td style="padding:4px 10px 4px 0;color:#6b7280;white-space:nowrap;vertical-align:top">' + esc(r[0]) + '</td>'
+          + '<td style="padding:4px 0;word-break:break-all;' + (r[2] ? 'color:#b3261e;font-weight:600' : '')
+          + '">' + esc(r[1]) + '</td></tr>';
+      }
+      html += '</table>';
+    }
+    if (opts.tips && opts.tips.length) {
+      html += '<div style="margin-top:14px;padding:12px 14px;background:#f4f6fa;border-radius:10px;font-size:13px">'
+        + '<div style="font-weight:600;margin-bottom:6px">怎么办</div><ul style="margin:0;padding-left:18px">';
+      for (var j = 0; j < opts.tips.length; j++) html += '<li style="margin:4px 0">' + opts.tips[j] + '</li>';
+      html += '</ul></div>';
+    }
+    card.innerHTML = html;
+
+    var bar = document.createElement('div');
+    bar.setAttribute('style', 'display:flex;gap:10px;margin-top:16px;flex-wrap:wrap');
+
+    var close = document.createElement('button');
+    close.textContent = '关闭';
+    close.setAttribute('style', btnStyle('#2f6fed', '#fff'));
+    close.onclick = hideDiag;
+
+    var reload = document.createElement('button');
+    reload.textContent = '重新加载';
+    reload.setAttribute('style', btnStyle('#eef1f6', '#1c1e21'));
+    reload.onclick = function () { location.reload(); };
+
+    var copy = document.createElement('button');
+    copy.textContent = '复制诊断信息';
+    copy.setAttribute('style', btnStyle('#eef1f6', '#1c1e21'));
+    copy.onclick = function () {
+      var text = opts.title + '\n' + (opts.rows || []).map(function (r) { return r[0] + ': ' + r[1]; }).join('\n');
+      if (navigator.clipboard) {
+        navigator.clipboard.writeText(text).then(function () { copy.textContent = '已复制'; }, function () {});
+      }
+    };
+
+    bar.appendChild(close);
+    bar.appendChild(reload);
+    bar.appendChild(copy);
+
+    // 可选动作按钮：[{ label, busyLabel?, onClick }]。
+    // onClick 返回字符串 → 直接作为新按钮文案；返回 Promise → 先显示 busyLabel，
+    // 完成后用 resolve 的字符串（或原 label）作为文案。
+    if (opts.actions && opts.actions.length) {
+      for (var k = 0; k < opts.actions.length; k++) {
+        (function (action) {
+          if (!action || typeof action.onClick !== 'function') return;
+          var b = document.createElement('button');
+          b.textContent = action.label || '操作';
+          b.setAttribute('style', btnStyle('#eef1f6', '#1c1e21'));
+          b.onclick = function () {
+            var out;
+            try { out = action.onClick(); }
+            catch (e) { b.textContent = '失败'; return; }
+            if (out && typeof out.then === 'function') {
+              b.textContent = action.busyLabel || '进行中…';
+              b.disabled = true;
+              out.then(function (v) {
+                b.disabled = false;
+                b.textContent = typeof v === 'string' ? v : (action.label || '完成');
+              }, function () {
+                b.disabled = false;
+                b.textContent = '失败';
+              });
+            } else if (typeof out === 'string') {
+              b.textContent = out;
+            }
+          };
+          bar.appendChild(b);
+        })(opts.actions[k]);
+      }
+    }
+
+    card.appendChild(bar);
+    wrap.appendChild(card);
+    wrap.addEventListener('click', function (e) { if (e.target === wrap) hideDiag(); });
+    document.body.appendChild(wrap);
+    panel = wrap;
+  }
+
+  window.__cajShowDiag = showDiag;
+  window.__cajHideDiag = hideDiag;
+  window.__cajBootError = function () { return bootError; };
+
+  /**
+   * 直接拉一次入口脚本，把几种完全不同的失败区分开：
+   * 被访问保护拦截 / 文件不存在 / MIME 不对 / 被服务器换成 HTML / 语法错误。
+   * 光靠脚本元素上的 error 事件，这几种看起来一模一样。
+   */
+  /**
+   * 从源码里抠出模块说明符。够用即可，不需要完整的解析器。
+   */
+  function importSpecifiers(source) {
+    var out = [];
+    var patterns = [
+      /\bfrom\s*["']([^"']+)["']/g,
+      /\bimport\s*["']([^"']+)["']/g,
+      /\bimport\s*\(\s*["']([^"']+)["']/g,
+    ];
+    for (var i = 0; i < patterns.length; i++) {
+      var m;
+      while ((m = patterns[i].exec(source))) {
+        var s = m[1];
+        if (s.charAt(0) === '.' && out.indexOf(s) < 0) out.push(s);
+      }
+    }
+    return out;
+  }
+
+  /**
+   * 沿模块依赖链走一遍，找出第一个没被正确下发的文件。
+   *
+   * 这一步非常关键：模块加载失败时，浏览器报的是**入口文件**的名字
+   * （"Failed to fetch dynamically imported module: .../app/app.js"），
+   * 但真正出问题的往往是它 import 的某个文件。曾经因此踩过坑：
+   * 托管商没把 .mjs 当 JavaScript 下发，而入口是 .js，于是错误信息一路指向入口。
+   */
+  async function probeModuleGraph(entryUrl, maxDepth) {
+    var seen = Object.create(null);
+    var queue = [[entryUrl, 0]];
+    var checked = [];
+    var firstBad = null;
+
+    while (queue.length && checked.length < 24) {
+      var item = queue.shift();
+      var url = item[0];
+      var depth = item[1];
+      if (seen[url]) continue;
+      seen[url] = true;
+
+      var record = { url: url, status: 0, type: '(取不到)' };
+      try {
+        var r = await fetch(url, { cache: 'no-store', credentials: 'same-origin' });
+        var text = await r.text();
+        record.status = r.status;
+        record.type = r.headers.get('content-type') || '(无)';
+        record.bytes = text.length;
+      } catch (err) {
+        record.type = '网络失败：' + err.message;
+      }
+      checked.push(record);
+
+      var ok = record.status === 200 && /javascript/.test(record.type);
+      if (!ok) {
+        if (!firstBad) firstBad = record;
+        continue;   // 这个文件都没拿到，就别往下追了
+      }
+      if (depth < maxDepth) {
+        var specs = importSpecifiers(text);
+        for (var i = 0; i < specs.length; i++) {
+          try { queue.push([new URL(specs[i], url).href, depth + 1]); } catch (e) { /* 忽略 */ }
+        }
+      }
+    }
+    return { checked: checked, firstBad: firstBad };
+  }
+
+  /** 把 URL 缩成便于阅读的相对路径。 */
+  function shortUrl(url) {
+    try {
+      var u = new URL(url);
+      return (u.origin === location.origin ? '' : u.origin) + u.pathname;
+    } catch (e) { return url; }
+  }
+
+  async function probeEntryScript() {
+    var tag = document.querySelector('script[type="module"][src]');
+    if (!tag) return null;
+    var src = tag.src;
+    var out = { url: src };
+
+    try {
+      var r = await fetch(src, { cache: 'no-store', credentials: 'same-origin' });
+      out.status = r.status;
+      out.type = r.headers.get('content-type') || '(无)';
+      var body = await r.text();
+      out.bytes = body.length;
+      out.head = body.replace(/\s+/g, ' ').slice(0, 90);
+      out.verdict = classifyProbe(out);
+
+      // 文件确实以 JavaScript 正常下发了却还是没跑起来 —— 那就是解析阶段的问题。
+      // 用带查询串的动态 import 把真正的 SyntaxError 逼出来（同时如果只是瞬时故障，应用会就地恢复）。
+      if (out.status === 200 && /javascript/.test(out.type)) {
+        try {
+          await import(src + (src.indexOf('?') < 0 ? '?' : '&') + 'cajprobe=' + Date.now());
+          out.imported = '成功（应用已就地恢复）';
+        } catch (err) {
+          out.imported = (err && err.name ? err.name + '：' : '') + (err && err.message ? err.message : String(err));
+          // 入口自己没问题却还是加载失败 —— 那就是依赖出的问题，把整条依赖链探一遍
+          try { out.graph = await probeModuleGraph(src, 3); } catch (e) { /* 探测失败不影响主流程 */ }
+        }
+      }
+    } catch (err) {
+      out.verdict = '网络层失败：' + err.message;
+      out.failed = true;
+    }
+    return out;
+  }
+
+  function classifyProbe(p) {
+    if (p.status === 401 || p.status === 403) return '被访问保护拦截（HTTP ' + p.status + '）';
+    if (p.status === 404) return '文件不存在（HTTP 404）';
+    if (p.status >= 500) return '服务器错误（HTTP ' + p.status + '）';
+    if (p.status === 200 && /text\/html/.test(p.type)) {
+      return '服务器把脚本请求返回成了 HTML（错误页或 SPA 回退）';
+    }
+    if (p.status === 200 && !/javascript/.test(p.type)) {
+      return 'MIME 不是 JavaScript（' + p.type + '），Safari 会拒绝执行';
+    }
+    if (p.status === 200) return '文件正常下发，问题出在解析阶段';
+    return 'HTTP ' + p.status;
+  }
+
+  var watchdogStarted = false;
+  function startWatchdog(delay) {
+    if (watchdogStarted) return;
+    watchdogStarted = true;
+    setTimeout(runWatchdog, delay);
+  }
+
+  async function runWatchdog() {
+    if (window.__caj) return;   // 正常启动，什么都不用做
+
+    var fileProto = location.protocol === 'file:';
+    var dir = esc(location.origin + location.pathname.replace(/[^/]*$/, ''));
+    var probe = null;
+    if (!fileProto && !window.__cajLoaded) {
+      try { probe = await probeEntryScript(); } catch (e) { /* 探测失败不影响主流程 */ }
+      // 动态 import 成功了，说明刚才只是瞬时故障，应用已经自己起来了
+      if (probe && probe.imported && probe.imported.indexOf('成功') === 0) return;
+    }
+
+    var tips;
+    var rows = [
+      ['地址', location.href],
+      ['协议', location.protocol + (fileProto ? ' ← 这就是原因' : '')],
+      ['安全上下文', String(window.isSecureContext)],
+      ['模块脚本已执行', window.__cajLoaded ? '是' : '否'],
+      ['捕获到的错误', bootError || '（无）', !!bootError],
+    ];
+    if (probe) {
+      rows.push(['入口脚本探测',
+        (probe.status ? 'HTTP ' + probe.status + ' · ' + probe.type + ' · ' + probe.bytes + ' 字节' : probe.verdict),
+        probe.status !== 200 || !/javascript/.test(probe.type || '')]);
+      rows.push(['判定', probe.verdict, probe.status !== 200 || !/javascript/.test(probe.type || '')]);
+      if (probe.head) rows.push(['返回内容开头', probe.head]);
+      if (probe.imported) rows.push(['解析结果', probe.imported, probe.imported.indexOf('成功') !== 0]);
+      if (probe.graph) {
+        if (probe.graph.firstBad) {
+          var bad = probe.graph.firstBad;
+          rows.push(['模块依赖探测',
+            '检查 ' + probe.graph.checked.length + ' 个模块，第一个失败的依赖：'
+            + shortUrl(bad.url)
+            + (bad.status ? ' → HTTP ' + bad.status : '')
+            + ' · ' + bad.type, true]);
+        } else {
+          rows.push(['模块依赖探测', probe.graph.checked.length + ' 个模块全部正常下发']);
+        }
+      }
+    }
+    // 浏览器在控制台里给出的原因往往是最准确的（MIME 不匹配、CSP 拒绝等）
+    for (var ci = Math.max(0, consoleLog.length - 4); ci < consoleLog.length; ci++) {
+      rows.push([ci === consoleLog.length - 1 ? '浏览器日志' : '', consoleLog[ci], true]);
+    }
+    rows.push(['用户代理', navigator.userAgent]);
+
+    if (fileProto) {
+      tips = [
+        '不要直接打开 HTML 文件。浏览器禁止 <code>file://</code> 页面加载 ES 模块，应用脚本根本不会运行。',
+        '在电脑上运行 <b>start.cmd</b>（或 <b>./start.sh</b>），用终端打印的局域网地址在 iPad 上打开。',
+        '或者把 <b>dist/</b> 上传到任意静态托管，用 HTTPS 地址打开。',
+      ];
+    } else if (probe && (probe.status === 401 || probe.status === 403)) {
+      tips = [
+        '这是<b>访问保护（密码保护）</b>造成的：托管商把整站拦住了，脚本请求同样被拦，'
+          + '而浏览器在页面本身通过验证后会显示页面 —— 于是就变成「界面在、脚本没跑」。',
+        '到托管后台关掉访问保护。Netlify：<b>Site configuration → Access &amp; security → '
+          + 'Password protection</b>，关闭后重新访问。<br>'
+          + '（Cloudflare 的 Cloudflare Access、Vercel 的 Deployment Protection 同理。）',
+        '自己验证一下：直接访问 <code>' + dir + 'app/app.js</code>。'
+          + '如果看到的是密码页或 401，就确认是这个原因。',
+      ];
+    } else if (probe && probe.status === 404) {
+      tips = [
+        '上传时漏了 <b>app/</b> 目录。要用 <b>dist/</b> 整个目录上传，层级不能变。',
+        '确认这些地址都能直接在浏览器里打开：<code>' + dir + 'app/app.js</code>、'
+          + '<code>' + dir + 'vendor/caj2pdf-rust/browser.js</code>。',
+      ];
+    } else if (probe && probe.status === 200 && /text\/html/.test(probe.type || '')) {
+      tips = [
+        '服务器把 <code>app/app.js</code> 当成 HTML 返回了 —— 通常是<b>SPA 回退规则</b>'
+          + '（把所有找不到的路径都重写到 index.html）或自定义错误页。',
+        '关掉该站点的 SPA / rewrite 回退规则，或换一个纯静态托管。',
+      ];
+    } else if (probe && probe.status === 200 && !/javascript/.test(probe.type || '')) {
+      tips = [
+        '<b>Safari 对脚本 MIME 比 Chrome 严格</b>：必须是 <code>text/javascript</code> 或 '
+          + '<code>application/javascript</code>，否则直接拒绝执行。',
+        '让服务器把 <b>.js</b> 按上面的类型下发即可。',
+      ];
+    } else if (probe && probe.graph && probe.graph.firstBad) {
+      var firstBad = probe.graph.firstBad;
+      tips = [
+        '入口脚本 <code>app/app.js</code> 本身没问题，但<b>它依赖的文件</b> '
+          + '<code>' + esc(shortUrl(firstBad.url)) + '</code> 没能正确加载'
+          + (firstBad.status ? '（HTTP ' + firstBad.status + '，' + esc(firstBad.type) + '）'
+                             : '（' + esc(firstBad.type) + '）') + '。',
+        '若 MIME 不是 JavaScript：<b>浏览器对模块脚本执行严格 MIME 检查</b>，'
+          + '服务器没把该后缀当脚本下发时，整个模块图会被拒绝执行。'
+          + '本工程已把所有模块统一成 <b>.js</b>；如果你看到的是 <code>.mjs</code>，'
+          + '说明部署的还是旧版本，重新用 <b>dist/</b> 传一次即可。',
+        '若状态是 404：上传时漏了这个文件。用 <b>dist/</b> 整个目录重传，层级不能变。',
+      ];
+    } else if (probe && probe.imported) {
+      tips = [
+        '文件能正常下载，但<b>解析失败</b>了 —— 上面「解析结果」那一行就是真正的错误。',
+        '把那一行连同「用户代理」发出来即可定位（多半是浏览器版本过旧）。',
+      ];
+    } else if (!window.__cajLoaded) {
+      tips = [
+        '静态资源可能没传全：<b>index.html</b> 与 <b>app/</b>、<b>vendor/</b> 必须在同一目录下，相对层级不能变。',
+        '再访问一次 <code>' + dir + 'app/app.js</code>：应当直接显示源码，而不是下载或报错。',
+      ];
+    } else {
+      tips = [
+        '脚本已开始执行，但初始化中途失败，上面捕获到的错误就是关键线索。',
+        '点「复制诊断信息」把内容发出来即可定位。',
+      ];
+    }
+
+    showDiag({ title: '应用没能启动', rows: rows, tips: tips });
+
+    // 只是加载得慢的话，等它起来就自动收起面板，避免误报
+    var poll = setInterval(function () {
+      if (window.__caj) { clearInterval(poll); hideDiag(); }
+    }, 400);
+    setTimeout(function () { clearInterval(poll); }, 90000);
+  }
+
+  // 兜底：即使一个错误事件都没收到，3 秒后也检查一次
+  startWatchdog(3000);
+})();
+</script>
+</body>
+</html>

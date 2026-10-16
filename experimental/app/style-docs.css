@@ -1,0 +1,224 @@
+/* ==========================================================================
+ * CAJ 阅读器 — 多文档标签栏样式（app/docs.js 配套）
+ *
+ * 布局背景：#toolbar 与 #stage 都是 position:fixed，且 #stage 用
+ * top: calc(--toolbar-h + safe-area) 顶在工具栏下面。标签栏 DOM 位于
+ * header 之后、#stage 之前，如果在常规流里会被固定定位的工具栏盖住，
+ * 所以这里也让 #docTabs 固定定位，并在它可见时把后续的 #stage / 查找栏 /
+ * 抽屉侧栏整体下移（用 :not([hidden]) ~ 兄弟选择器）。
+ *
+ * 全部类名以 .doc- 为前缀，避免影响其它模块。
+ * ========================================================================== */
+
+:root {
+  /* 标签栏高度；下方用它的规则只在 #docTabs 可见时生效 */
+  --docs-tab-h: 40px;
+}
+
+/* ─────────────────────────  容器  ───────────────────────── */
+
+.doc-tabs {
+  position: fixed;
+  z-index: 38; /* 工具栏 40、查找栏 45 之下；侧栏 30/31、遮罩 29 之上 */
+  top: calc(var(--toolbar-h) + env(safe-area-inset-top));
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: var(--docs-tab-h);
+  padding: 4px calc(8px + env(safe-area-inset-right)) 4px calc(8px + env(safe-area-inset-left));
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* 作者样式里的 display:flex 会压过 UA 的 [hidden]{display:none}，必须显式补回 */
+.doc-tabs[hidden] { display: none; }
+
+/* 标签栏可见时，把主体 / 查找栏 / 抽屉整体下移一个标签栏的高度 */
+#docTabs:not([hidden]) ~ #stage {
+  top: calc(var(--toolbar-h) + env(safe-area-inset-top) + var(--docs-tab-h));
+}
+#docTabs:not([hidden]) ~ .search-bar {
+  top: calc(var(--toolbar-h) + env(safe-area-inset-top) + var(--docs-tab-h) + 10px);
+}
+#docTabs:not([hidden]) ~ #stage .sidebar.is-overlay,
+#docTabs:not([hidden]) ~ #stage .scrim {
+  top: calc(var(--toolbar-h) + env(safe-area-inset-top) + var(--docs-tab-h));
+}
+
+/* ─────────────────────────  标签列表（横向滚动）  ───────────────────────── */
+
+.doc-tab-list {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  height: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
+}
+.doc-tab-list::-webkit-scrollbar { height: 4px; }
+.doc-tab-list::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 4px;
+}
+
+/* ─────────────────────────  单个标签  ───────────────────────── */
+
+.doc-tab {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 116px;
+  max-width: 220px;
+  height: 32px;
+  padding: 0 4px 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.doc-tab:hover { background: var(--surface-3); }
+
+.doc-tab.is-on {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.doc-tab.is-loading { opacity: .6; }
+
+.doc-tab:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.doc-tab-fmt {
+  flex: 0 0 auto;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--surface-3);
+  color: var(--text-dim);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: .04em;
+  line-height: 1.5;
+}
+.doc-tab.is-on .doc-tab-fmt {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+
+.doc-tab-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.doc-tab-close {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  color: var(--text-dim);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+.doc-tab-close:hover,
+.doc-tab-close:focus-visible {
+  background: var(--danger);
+  color: #fff;
+  outline: none;
+}
+
+/* ─────────────────────────  新建标签按钮  ───────────────────────── */
+
+.doc-tab-new {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.doc-tab-new:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.doc-tab-new:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* ─────────────────────────  触屏：加大点击热区  ───────────────────────── */
+
+@media (hover: none) and (pointer: coarse) {
+  .doc-tab { height: 34px; }
+  .doc-tab-close { width: 28px; height: 28px; }
+  .doc-tab-new { width: 34px; height: 34px; }
+  /* 触屏上隐藏滚动条，避免把标签压扁 */
+  .doc-tab-list { scrollbar-width: none; }
+  .doc-tab-list::-webkit-scrollbar { display: none; }
+}
+
+/* ─────────────────────────  窄屏：占满宽度、不挤坏工具栏  ───────────────────────── */
+
+@media (max-width: 560px) {
+  :root { --docs-tab-h: 42px; }
+  .doc-tabs {
+    gap: 4px;
+    padding: 4px calc(6px + env(safe-area-inset-right)) 4px calc(6px + env(safe-area-inset-left));
+  }
+  .doc-tab {
+    min-width: 104px;
+    max-width: 62vw;
+    height: 34px;
+  }
+  .doc-tab-close { width: 26px; height: 26px; }
+  .doc-tab-new { width: 34px; height: 34px; }
+}
+
+/* ─────────────────────────  打印：标签栏不出现  ───────────────────────── */
+
+@media print {
+  .doc-tabs { display: none !important; }
+  #docTabs:not([hidden]) ~ #stage,
+  #docTabs:not([hidden]) ~ .search-bar {
+    top: calc(var(--toolbar-h) + env(safe-area-inset-top));
+  }
+}
+
+/* ─────────────────────────  减少动效  ───────────────────────── */
+
+@media (prefers-reduced-motion: reduce) {
+  .doc-tab, .doc-tab-close, .doc-tab-new { transition: none; }
+}

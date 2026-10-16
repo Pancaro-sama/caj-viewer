@@ -217,9 +217,6 @@ let thumbObserver = null;
 
 /** 把活动文档从视图上摘下来（保留 pdf / objectUrl / 已渲染的 canvas）。 */
 function deactivateDocument() {
-  // 保存面板里的文件名、页数、下载地址全是当前文档的快照；切走以后它们就是错的，
-  // 继续挂着还会把「那个文档」的数据存成「这个文档」的名字。
-  if (exportSheet.open) closeExportSheet();
   const ctx = adoptActiveDoc();
   if (el.viewer) ctx.scrollTop = el.viewer.scrollTop;
   ctx.current = state.current;
@@ -723,10 +720,6 @@ async function openFileInto(ctx, file) {
     if (!stale()) scheduleSelfHeal();
   } catch (err) {
     hideProgress();
-    // 失败时把这次没打开成的 ctx 收拾干净：不然它会留着半挂载的 pdf / objectUrl，
-    // 保存面板照样能打开（显示「未打开文件 · N 页」这种自相矛盾的内容），
-    // 并把一份解析失败的 PDF 存给用户。
-    discardFailedOpen(ctx);
     // 这是「已经告知用户」的可预期失败，用 warn 记录即可，不必污染控制台错误流
     console.warn('打开文件失败：', err);
     if (err?.name === 'AbortError' || err?.code === 'CANCELLED') {
@@ -739,31 +732,6 @@ async function openFileInto(ctx, file) {
   } finally {
     el.btnCancel.onclick = null;
   }
-}
-
-/**
- * 打开失败后的收尾：只有「这次打开的目标就是当前活动文档」时才动全局 UI，
- * 后台标签打开失败不能把用户正在看的文档清掉。
- */
-function discardFailedOpen(ctx) {
-  const wasActive = ctx === state;
-  try { ctx.pdf?.destroy?.(); } catch { /* 忽略 */ }
-  try { if (ctx.objectUrl) URL.revokeObjectURL(ctx.objectUrl); } catch { /* 忽略 */ }
-  ctx.pdf = null;
-  ctx.objectUrl = null;
-  ctx.pdfBlob = null;
-  ctx.numPages = 0;
-  ctx.pages = [];
-  try { ctx.pagesEl?.replaceChildren(); } catch { /* 忽略 */ }
-  if (!wasActive) return;
-  closeExportSheet();
-  el.empty.hidden = false;
-  el.btnDownload.disabled = true;
-  el.formatBadge.hidden = true;
-  el.pageCount.textContent = '/ 0';
-  el.pageInput.value = '';
-  el.paneOutline.textContent = '';
-  el.paneThumbs.textContent = '';
 }
 
 /**
@@ -1928,38 +1896,6 @@ async function mapLimit(items, limit, fn) {
   return out;
 }
 
-/**
- * 汇总各页「有文字 / 有文本层」的情况（纯函数，便于单元测试）。
- *
- * 传进来的每页描述：{ hasLayer, hasText }，其中 hasText 是「这一页的文本项里
- * 有没有非空 str」——pdf.js 只为带 str 的项建 span，扫描页 / 纯图页 / 被转换器
- * 替换掉的空白页在 DOM 上与「文本层坏掉」完全同形，只看 span 会永远报假红字。
- */
-function summarizeTextLayers(descs) {
-  const out = { withText: 0, withLayer: 0, missing: 0 };
-  for (const d of descs) {
-    if (d.hasLayer) out.withLayer += 1;
-    if (d.hasText) {
-      out.withText += 1;
-      if (!d.hasLayer) out.missing += 1;
-    }
-  }
-  return out;
-}
-
-/** 由汇总结果得出文本层异常（没有异常返回 null）。 */
-function textLayerIssueFrom(summary) {
-  if (!summary.missing) return null;
-  // 一页都没建出文本层 / 只是部分页缺失，是两个不同的故障，文案与定位方式都不同。
-  const all = summary.withLayer === 0 && summary.withText === summary.missing;
-  return {
-    code: all ? 'text-layer-empty' : 'text-layer-partial',
-    count: summary.missing,
-    label: `${summary.missing} 页有文字却没有文本层（文字会叠在一起、查找会失效）`,
-    auto: true,
-  };
-}
-
 function clearHighlights(p) {
   const layer = p.textLayerDiv;
   if (!layer) return;
@@ -2080,13 +2016,8 @@ function sanitizePdfName(name) {
   const dot = base.lastIndexOf('.');
   if (dot > 0 && dot > base.length - 8) base = base.slice(0, dot);
   base = base.replace(/^\.+/, '').trim();
-  // Windows 保留设备名当文件名会写不进去（`con`、`nul`、`com1`…），加前缀绕开。
-  const RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
-  if (RESERVED.test(base)) base = `_${base}`;
-  // 先截断再补扩展名，否则截断点落在 `.pdf` 之前会留下 `a..pdf`
-  if (base.length > 116) base = base.slice(0, 116);
-  base = base.replace(/[. ]+$/, ''); // Windows 也不接受结尾的点和空格
   if (!base) base = 'document';
+  if (base.length > 120) base = base.slice(0, 120);
   return `${base}.pdf`;
 }
 
@@ -2142,9 +2073,7 @@ function exportModeInfo() {
 }
 
 function openExportSheet() {
-  // state.pdf 也要查：打开失败时 release/清理还没跑完的窗口里，objectUrl 可能已经就位，
-  // 但这份 PDF 根本解析不开，存下来对用户没有意义。
-  if (!state.pdf || !state.objectUrl || !state.pdfBlob) return;
+  if (!state.objectUrl || !state.pdfBlob) return;
   exportSheet.open = true;
   el.exportName.value = state.downloadName || suggestPdfName(state.fileName);
   const size = formatBytes(state.pdfBlob.size);
@@ -2186,11 +2115,9 @@ function exportNameFromSheet() {
 }
 
 /** 兜底通道：<a download>。download 属性在 iOS 上会被忽略，所以只当最后选择。 */
-function downloadViaAnchor(name, url) {
-  const href = url || state.objectUrl;
-  if (!href) return;
+function downloadViaAnchor(name) {
   const a = document.createElement('a');
-  a.href = href;
+  a.href = state.objectUrl;
   a.download = name;
   a.rel = 'noopener';
   document.body.append(a);
@@ -2202,10 +2129,7 @@ async function saveExport() {
   if (exportSheet.busy) return;
   const name = exportNameFromSheet();
   const blob = state.pdfBlob;
-  // 把地址在开头就固定下来：下面有 await（分享面板 / 另存为对话框），期间用户可能切了标签，
-  // 那时 state.objectUrl 已经指向别的文档，再读就会「名字是这个文档、内容是那个文档」。
-  const objectUrl = state.objectUrl;
-  if (!blob || !objectUrl) { setExportHint('当前文档还没有可保存的 PDF 数据。', true); return; }
+  if (!blob) { setExportHint('当前文档还没有可保存的 PDF 数据。', true); return; }
 
   exportSheet.busy = true;
   el.btnExportSave.disabled = true;
@@ -2231,7 +2155,7 @@ async function saveExport() {
         setExportHint('这个浏览器不支持把 PDF 交给分享面板，已改用浏览器下载。', true);
       }
       exportSheet.mode = 'anchor';
-      downloadViaAnchor(name, objectUrl);
+      downloadViaAnchor(name);
       closeExportSheet();
       toast(`已开始下载 ${name}`, 'ok');
       return;
@@ -2261,7 +2185,7 @@ async function saveExport() {
     }
 
     // 3) 兜底：浏览器下载。
-    downloadViaAnchor(name, objectUrl);
+    downloadViaAnchor(name);
     closeExportSheet();
     toast(`已开始下载 ${name}，可在浏览器下载列表中查看`, 'ok');
   } catch (err) {
@@ -2600,18 +2524,32 @@ async function detectRuntimeIssues() {
 
   const rendered = state.pages.filter((p) => p.rendered && !p.renderTask && !p.textLayerPending);
 
-  // 「这一页缺文本层」必须结合「这一页到底有没有文字」判断（见 summarizeTextLayers）。
-  // 判定逻辑抽成纯函数，好让单元测试覆盖「假红字 / 假阴性」这类只在特定文档上现形的问题。
-  const descriptors = await mapLimit(rendered, 4, async (p) => {
+  // 「这一页缺文本层」必须结合「这一页到底有没有文字」判断：
+  // pdf.js 只为带 str 的项建 span，扫描页 / 纯图页 / 被转换器替换掉的空白页
+  // 在 DOM 上与「文本层坏掉」完全同形。只看 span 会让正常文档永远报红字。
+  let hasTextNoLayer = 0;
+  let withText = 0;
+  let withLayer = 0;
+  await mapLimit(rendered, 4, async (p) => {
     const layer = p.textLayerDiv;
     if (layer && layer.isConnected && layer.querySelector('span')) {
-      return { hasLayer: true, hasText: true };
+      withLayer += 1;
+      withText += 1;
+      return;
     }
     const items = await pageTextItems(p);
-    return { hasLayer: false, hasText: items.some((it) => typeof it.str === 'string' && it.str.length > 0) };
+    if (!items.some((it) => typeof it.str === 'string' && it.str.length > 0)) return;
+    withText += 1;
+    hasTextNoLayer += 1;
   });
-  const textIssue = textLayerIssueFrom(summarizeTextLayers(descriptors));
-  if (textIssue) issues.push(textIssue);
+  if (hasTextNoLayer) {
+    issues.push({
+      code: hasTextNoLayer === withText && withLayer === 0 ? 'text-layer-empty' : 'text-layer-partial',
+      count: hasTextNoLayer,
+      label: `${hasTextNoLayer} 页有文字却没有文本层（文字会叠在一起、查找会失效）`,
+      auto: true,
+    });
+  }
 
   for (const p of rendered) {
     const layer = p.textLayerDiv;
@@ -2982,9 +2920,6 @@ el.btnSelfCheck?.addEventListener('click', () => {
 /* 自动化测试与调试用的最小接口。不影响正常使用。 */
 globalThis.__caj = {
   openFile,
-  // 供单元测试直接验证「有文字没有文本层」的判定（假红字 / 假阴性都是靠这里定位的）
-  summarizeTextLayers,
-  textLayerIssueFrom,
   openPdfInTab,
   rotate,
   docs: app.docs,

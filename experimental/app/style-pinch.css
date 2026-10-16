@@ -1,0 +1,18 @@
+/* ==========================================================================
+ * 双指缩放相关样式（AR-2.0：新增样式只放这里，index.html 里在 style.css 之后引入）
+ * ========================================================================== */
+
+/* 手势进行中：禁止文本选择与长按菜单，避免第二根手指落下时选中文字。 */
+#viewer.is-pinching {
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+
+/* 只写 transform 的那几帧把 #pages 提升为合成层：减少重绘、抑制抖动。 */
+#viewer.is-pinching #pages {
+  will-change: transform;
+  -webkit-user-select: none;
+  user-select: none;
+}
