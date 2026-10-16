@@ -3,7 +3,9 @@
  *
  * 目的：让应用可以「安装到主屏」并在断网后继续打开。
  * 策略：
- *   · 应用外壳（HTML/CSS/JS/manifest）→ stale-while-revalidate，启动最快
+ *   · 应用外壳（HTML）导航 → network-first（在线时发布即生效），
+ *     超时/失败回退缓存；缓存为空时返回明确 5xx，绝不回 200 白屏
+ *   · 应用外壳其余文件（CSS/JS/manifest）→ stale-while-revalidate
  *   · vendor 资源（WASM / PDF.js / 字体表）→ cache-first，体积大且几乎不变
  *   · 其余子资源（脚本 / 样式 / Worker / 字体 / 图片…）→ network-first，
  *     失败时回退缓存；但绝不把 HTML 兜底页当成脚本 / 样式下发
@@ -19,7 +21,7 @@
 
 /* 缓存版本。改动 SHELL_FILES / VENDOR_FILES 或发布新版本时必须 bump，
  * 否则老客户端会一直命中旧缓存（activate 时按前缀清理旧缓存）。 */
-const VERSION = 'caj-viewer-v3';
+const VERSION = 'caj-viewer-v4';
 const SHELL = `${VERSION}-shell`;
 const VENDOR = `${VERSION}-vendor`;
 
@@ -135,13 +137,33 @@ const SUBRESOURCE_DEST = new Set([
 ]);
 
 self.addEventListener('install', (event) => {
-  event.waitUntil(
-    caches.open(SHELL)
-      .then((cache) => cache.addAll(SHELL_FILES))
-      .then(() => self.skipWaiting())
-      .catch(() => self.skipWaiting()),
-  );
+  event.waitUntil((async () => {
+    try {
+      const cache = await caches.open(SHELL);
+      await cache.addAll(SHELL_FILES);
+    } catch (err) {
+      // 外壳没装完就跳过等待 = activate 后缓存里可能什么都没有，
+      // 那时离线导航只能白屏。用自检确认「新版外壳文件确实在缓存里」再决定。
+      const ok = await shellLooksComplete();
+      if (!ok) {
+        console.warn('[sw] 外壳预缓存失败，保留旧版本继续服务：', err);
+        return; // 不等 skipWaiting：新 SW 停在 waiting，旧 SW 继续服务
+      }
+    }
+    await self.skipWaiting();
+  })());
 });
+
+/** 逐个确认 SHELL_FILES 都能从缓存里取到（比 addAll 的原子失败更宽容）。 */
+async function shellLooksComplete() {
+  try {
+    const cache = await caches.open(SHELL);
+    const hits = await Promise.all(SHELL_FILES.map((f) => cache.match(f, { ignoreSearch: true })));
+    return hits.every((h) => !!h);
+  } catch {
+    return false;
+  }
+}
 
 self.addEventListener('activate', (event) => {
   event.waitUntil((async () => {
@@ -297,6 +319,13 @@ async function matchUsableCache(request) {
   return null;
 }
 
+/** 网络与缓存都拿不到可用页面时的明确失败（不可用但能一眼看出原因，不是白屏）。 */
+function unavailableResponse(status = 504, statusText = 'Network Error') {
+  const headers = new Headers();
+  headers.set('content-type', 'text/plain; charset=utf-8');
+  return new Response('', { status, statusText, headers });
+}
+
 /**
  * HTML 兜底页绝不能再往脚本 / 样式的位置送。
  * 但状态码要保留 —— 应用自己的启动探测靠 HTTP 401/404 判断被谁拦截。
@@ -324,30 +353,46 @@ function htmlAsFailure(res) {
  */
 async function handleNavigation(request) {
   const cache = await caches.open(SHELL);
-  const fallback = async () => (await cache.match(request, { ignoreSearch: true }))
+  // 精确匹配优先：ignoreSearch 会把 `?v=2` 的请求匹配到 `?v=1` 那次留下的条目，
+  // 而导航 URL 带什么 query 是不确定的（PWA 启动、外链、分享都可能带参数）。
+  const fallback = async () => (await cache.match(request))
+    || (await cache.match(request, { ignoreSearch: true }))
     || cache.match('./index.html', { ignoreSearch: true });
+
+  // 网络响应永远只用来「决定这次给什么」，不缓存非 HTML 兜底页（网关拦截页会毒化缓存）。
+  // 缓存写入单独跑：即使 2.5s 超时先返回了缓存，真实响应到了也能落到缓存里。
+  const pending = fetch(request).then((res) => {
+    if (res.ok && isHtmlResponse(res)) {
+      const copy = res.clone();
+      cache.put(request, copy).catch(() => {});
+    }
+    return res;
+  }, () => null);
 
   let timer = 0;
   try {
-    const network = fetch(request).then((res) => {
-      if (res.ok) cache.put(request, res.clone()).catch(() => {});
-      return res;
-    });
     const res = await Promise.race([
-      network,
+      pending,
       new Promise((resolve) => { timer = setTimeout(() => resolve(null), 2500); }),
     ]);
-    if (res && !isHtmlResponse(res)) return res;
-    // 拿到 HTML 兜底页（网关拦截）时不能当真页面用，交给缓存。
-    if (res) return (await fallback()) || htmlAsFailure(res);
-    return (await fallback()) || await network;
+    if (res && isHtmlResponse(res)) return res;
+    // 超时或拿到网关 HTML 兜底页 → 用缓存里上一次的好版本。
+    const cached = await fallback();
+    if (cached) return cached;
+    // 缓存也为空时，迟到的真实响应仍然比什么都好（总比白屏强）。
+    const late = await pending;
+    if (late && isHtmlResponse(late)) return late;
+    if (res && isHtmlResponse(res)) return res;
+    // 明确失败：返回 200 空体浏览器会当成「正常但空白」的页面（白屏且查不出原因）。
+    return htmlAsFailure(late || res || unavailableResponse(504, 'Offline'));
   } catch {
-    return (await fallback()) || new Response('', { status: 504, statusText: 'Network Error' });
+    const cached = await fallback();
+    if (cached) return cached;
+    return unavailableResponse(504, 'Network Error');
   } finally {
     clearTimeout(timer);
   }
 }
-
 /** vendor 运行时：缓存优先；不缓存 HTML 兜底页与 206 分片。 */
 async function handleVendor(request) {
   const cache = await caches.open(VENDOR);
@@ -400,7 +445,7 @@ self.addEventListener('fetch', (event) => {
   const url = new URL(request.url);
   if (url.origin !== self.location.origin) return;   // 不碰跨源请求
 
-  // 导航请求：外壳缓存优先 + 后台更新，行为保持不变。
+  // 导航请求：网络优先（在线时发布即生效），超时/失败回退缓存。
   if (request.mode === 'navigate') {
     event.respondWith(handleNavigation(request));
     return;
@@ -420,3 +465,17 @@ self.addEventListener('fetch', (event) => {
 
   // 其余请求直连网络，不缓存。
 });
+
+/* 单元测试钩子：只在测试里给 globalThis 预置 __CAJ_SW_TEST_HOOKS__ 时才会挂出来，
+ * 生产环境这段等价于什么都不做（测试见 tests/sw-navigation.test.mjs）。 */
+if (globalThis.__CAJ_SW_TEST_HOOKS__) {
+  Object.assign(globalThis.__CAJ_SW_TEST_HOOKS__, {
+    handleNavigation,
+    handleVendor,
+    handleSubresource,
+    isHtmlResponse,
+    shellLooksComplete,
+    SHELL_FILES,
+    VERSION,
+  });
+}

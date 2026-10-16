@@ -1742,10 +1742,25 @@ try {
     `detail=${exportSheet.st.detail} blob=${exportSheet.blobSize}`);
   // 通道必须跟浏览器真实能力一致：桌面 Chrome 的 navigator.canShare 不认 files，
   // 只检查函数存在会把「浏览器下载」误报成「系统分享面板」。
-  check('保存面板说明走哪条保存通道（分享面板 / 另存为 / 浏览器下载）',
-    /保存方式：/.test(exportSheet.st.modeText) && exportSheet.st.mode === exportSheet.expectMode,
-    `modeText=${exportSheet.st.modeText} mode=${exportSheet.st.mode} expect=${exportSheet.expectMode} caps=${JSON.stringify(exportSheet.caps)}`);
-  check('保存面板显示下载地址（blob:，与当前文档的 objectUrl 一致）',
+  // 这里不断言「app 选中的通道 === 测试自己按同样优先级算出来的通道」（那是同源恒真），
+  // 而是断言「面板上写出来的通道名 / 下落说明」必须与 app 实际会走的那条通道自洽。
+  const MODE_LABELS = { picker: '另存为对话框', share: '系统分享面板', anchor: '浏览器下载' };
+  const MODE_HINTS = {
+    picker: /另存为对话框/,
+    share: /分享面板/,
+    anchor: /下载目录|下载项/,
+  };
+  check('保存面板说明走哪条保存通道（且文案与实际通道自洽）',
+    /保存方式：/.test(exportSheet.st.modeText)
+    && MODE_LABELS[exportSheet.st.mode] !== undefined
+    && exportSheet.st.modeText.includes(MODE_LABELS[exportSheet.st.mode])
+    && MODE_HINTS[exportSheet.st.mode].test(exportSheet.st.hint),
+    `modeText=${exportSheet.st.modeText} mode=${exportSheet.st.mode} hint=${exportSheet.st.hint}`);
+  check('保存通道优先级正确（另存为 > 分享面板 > 浏览器下载）',
+    exportSheet.st.mode === (exportSheet.caps.savePicker ? 'picker'
+      : exportSheet.caps.share ? 'share' : 'anchor'),
+    `mode=${exportSheet.st.mode} caps=${JSON.stringify(exportSheet.caps)}`);
+  check('保存面板显示下载地址（blob:，与面板里摊开的地址是同一个）',
     exportSheet.objectUrl.startsWith('blob:')
     && exportSheet.st.link === exportSheet.objectUrl
     && exportSheet.linkShown === exportSheet.objectUrl,
@@ -1775,6 +1790,70 @@ try {
     return { open: !document.querySelector('#exportOverlay').hidden, state: window.__caj.exportPanelState().open };
   `);
   check('保存面板可以关掉', !exportClosed.open && !exportClosed.state, JSON.stringify(exportClosed));
+
+  // 「复制地址」按钮：成功或失败都必须给出明确反馈（headless 里剪贴板权限不确定，
+  // 所以只断言「点完一定更新提示」，不断言复制一定成功）。
+  const copyResult = await cdp.eval(`
+    window.__caj.openExportSheet();
+    const before = window.__caj.exportPanelState().hint;
+    document.querySelector('#btnExportCopy').click();
+    await new Promise((r) => setTimeout(r, 250));
+    const after = window.__caj.exportPanelState();
+    window.__caj.closeExportSheet();
+    return { before, after: after.hint, isError: after.hintIsError };
+  `);
+  check('「复制地址」按钮会给出明确反馈（成功或提示手动复制）',
+    !!copyResult.after && copyResult.after !== copyResult.before
+    && /已复制|复制失败/.test(copyResult.after),
+    JSON.stringify(copyResult));
+
+  // 保存面板里的文件名 / 页数 / 地址都是「打开面板那一刻的文档」快照。
+  // 切标签以后必须关掉；重新打开时要反映新文档，不能把上一个文档的数据存下来。
+  const exportSwitch = await cdp.eval(`
+    const docs = window.__caj.docs.list();
+    const act = docs.find((d) => d.active);
+    const other = docs.find((d) => !d.active);
+    let before = null;
+    let afterClose = null;
+    let reopened = null;
+    let back = null;
+    try {
+      window.__caj.openExportSheet();
+      before = { open: window.__caj.exportPanelState().open, detail: window.__caj.exportPanelState().detail };
+      if (other && act) {
+        await window.__caj.docs.switchTo(other.id);
+        await new Promise((r) => setTimeout(r, 900));
+        afterClose = {
+          open: window.__caj.exportPanelState().open,
+          hidden: document.querySelector('#exportOverlay').hidden,
+          name: window.__caj.state.fileName,
+        };
+        window.__caj.openExportSheet();
+        // blob URL 必须是切换之后那个文档的，否则存下来的是上一个文档的内容
+        reopened = {
+          detail: window.__caj.exportPanelState().detail,
+          link: window.__caj.exportPanelState().link,
+          objectUrl: String(window.__caj.state.objectUrl || ''),
+          id: window.__caj.state.objectUrl && document.querySelector('#exportLink').textContent,
+        };
+        window.__caj.closeExportSheet();
+        await window.__caj.docs.switchTo(act.id);
+        await new Promise((r) => setTimeout(r, 900));
+        back = { open: window.__caj.exportPanelState().open, name: window.__caj.state.fileName };
+      }
+    } catch (err) {
+      return { error: String(err && err.message || err), before, afterClose, reopened, back };
+    }
+    return { before, afterClose, reopened, back, switchedName: other && other.fileName, activeName: act && act.fileName };
+  `);
+  check('切标签会关掉保存面板（不把上一个文档的数据摆在新文档上）',
+    !exportSwitch.error && exportSwitch.before?.open
+    && exportSwitch.afterClose?.open === false && exportSwitch.afterClose?.hidden === true,
+    JSON.stringify(exportSwitch));
+  check('重新打开保存面板时显示的是当前文档（详情与下载地址都指向它）',
+    !exportSwitch.error && exportSwitch.reopened?.detail.includes(exportSwitch.afterClose?.name)
+    && exportSwitch.reopened?.link === exportSwitch.reopened?.objectUrl,
+    JSON.stringify(exportSwitch));
 
 } catch (err) {
   check('测试流程本身未抛异常', false, err.message);
